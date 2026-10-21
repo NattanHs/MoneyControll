@@ -994,9 +994,36 @@ async function budgetForm(existing) {
 
 const kb = n => (n >= 1048576 ? `${num(n / 1048576, 1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
-async function restoreFrom(label, call) {
-  const ok = await confirmDialog({ title: 'Restaurar backup', confirmLabel: 'Restaurar', danger: true,
-    message: `Os dados atuais serão substituídos pelos de ${label}. Antes disso o app guarda uma cópia de segurança do que existe agora, então dá para desfazer. Continuar?` });
+/** Texto da confirmação de restauração: compara o arquivo com os dados atuais (pela linhagem das versões, nunca pela data). */
+function restoreMessage(label, info) {
+  const count = x => `${x.tx_count} lançamento${x.tx_count === 1 ? '' : 's'}${x.last_date ? `, o último de ${dateBR(x.last_date)}` : ''}`;
+  const p = (text, bold) => h('p', { style: { marginTop: '8px' } }, bold ? h('b', null, text) : text);
+  const box = h('div');
+  const rel = info.relation;
+  const fewer = info.file.tx_count < info.local.tx_count || (info.file.last_date && info.local.last_date && info.file.last_date < info.local.last_date);
+  if (rel === 'file-older') {
+    box.append(p(`ATENÇÃO: ${label} é MAIS ANTIGO que os dados que estão no app agora. Restaurar vai desfazer tudo o que foi lançado depois dele.`, true));
+  } else if (rel === 'file-newer') {
+    box.append(p(`${label} é uma versão mais nova que os dados atuais.`));
+  } else if (rel === 'same') {
+    box.append(p(`${label} é da mesma versão dos dados atuais (as alterações feitas depois dela, se houver, serão desfeitas).`));
+  } else {
+    box.append(p(`Não dá para saber se ${label} é mais novo ou mais antigo (vem de outra linhagem de dados ou de uma versão antiga do app).`, true));
+    if (fewer) box.append(p('Pelos números abaixo ele parece ter MENOS dados que os atuais.', true));
+  }
+  box.append(p(`Arquivo: ${count(info.file)}.`));
+  box.append(p(`Atual: ${count(info.local)}.`));
+  if (info.local.dirty && rel !== 'file-older') box.append(p('Há alterações deste aparelho que ainda não foram sincronizadas com o Drive e serão substituídas.'));
+  if (rel !== 'file-newer') box.append(p('Se a sincronização com o Drive estiver ligada, o que você restaurar passa a valer também no Drive (o Drive guarda uma cópia da versão atual antes).'));
+  box.append(p('Antes de restaurar, o app guarda uma cópia dos dados atuais em "Antes de restaurar", então dá para desfazer. Continuar?'));
+  return box;
+}
+
+async function restoreFrom(label, inspect, call) {
+  let info;
+  try { info = await inspect(); } catch (e) { toast(e.message, 'error'); return; }
+  const ok = await confirmDialog({ title: info.relation === 'file-older' ? 'Restaurar um arquivo MAIS ANTIGO' : 'Restaurar backup',
+    confirmLabel: info.relation === 'file-older' ? 'Restaurar mesmo assim' : 'Restaurar', danger: true, message: restoreMessage(label, info) });
   if (!ok) return;
   try { await call(); toast('Backup restaurado'); refresh(); } catch (e) { toast(e.message, 'error'); }
 }
@@ -1119,11 +1146,12 @@ async function pageSettings() {
       const file = e.target.files[0];
       e.target.value = '';
       if (!file) return;
-      await restoreFrom(`"${file.name}"`, async () => api('POST', '/backups/restore-upload', { data: await fileToBase64(file) }));
+      const data = await fileToBase64(file);
+      await restoreFrom(`o arquivo "${file.name}"`, () => api('POST', '/backups/inspect-upload', { data }), () => api('POST', '/backups/restore-upload', { data }));
     } });
   const backupRows = bk.items.length ? bk.items.map(b => h('div', { class: 'list-row' },
     h('div', { class: 'grow' }, h('b', null, b.kind_label), h('small', null, `${dateBR(b.modified.slice(0, 10))} às ${b.modified.slice(11)} · ${kb(b.size)}`)),
-    btn('Restaurar', 'small', () => restoreFrom(`${dateBR(b.modified.slice(0, 10))} (${b.kind_label.toLowerCase()})`, () => api('POST', '/backups/restore', { name: b.name })), 'upload')))
+    btn('Restaurar', 'small', () => restoreFrom(`a cópia de ${dateBR(b.modified.slice(0, 10))} (${b.kind_label.toLowerCase()})`, () => api('POST', '/backups/inspect', { name: b.name }), () => api('POST', '/backups/restore', { name: b.name })), 'upload')))
     : [h('div', { class: 'muted', style: { padding: '8px 0' } }, 'Nenhum backup ainda. A primeira cópia automática é feita quando houver dados.')];
 
   const budgetRows = budgets.length ? budgets.map(b => h('div', { class: 'list-row' },
@@ -1150,6 +1178,7 @@ async function pageSettings() {
         budgetRows)),
     h('div', { class: 'stack' },
     licenseInfo.enabled ? licenseCard(licenseInfo) : null,
+    syncCard(),
     exportCard(),
     h('div', { class: 'card' },
       h('div', { class: 'section-title' }, 'Seus dados e backups'),
@@ -1606,6 +1635,122 @@ function licenseNotice(l) {
   return h('div', { class: 'lic-note' }, h('span', null, msg), btn('Ativar', 'small', licenseForm));
 }
 
+// ------------------------------------------------------------------ sincronização com o Google Drive (lógica em sync.js)
+const syncWhen = iso => (iso ? new Date(iso).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '');
+
+function syncConflictDialog(r) {
+  Sync.setConflictPending(true);
+  const st = Sync.status();
+  const remoteWhen = r.remote && r.remote.modifiedTime ? syncWhen(r.remote.modifiedTime) : '';
+  const intro = r.first
+    ? 'Este aparelho já tem dados e o Google Drive também (de outro aparelho ou de uma sincronização anterior).'
+    : 'Os dados mudaram aqui e também no Google Drive desde a última sincronização' + (st.lastSync ? ` (${syncWhen(st.lastSync)})` : '') + '.';
+  const decide = async keep => {
+    const res = await Sync.resolveConflict(keep);
+    if (res.state === 'enviado') toast('Drive atualizado com os dados deste aparelho');
+    else if (res.state === 'erro') toast(res.message, 'error');
+    else if (res.state === 'login') toast('A sessão do Google expirou. Conecte de novo.', 'error');
+  };
+  modal({
+    title: 'Dados diferentes no Drive',
+    onClose: () => Sync.setConflictPending(false),
+    build: close => h('div', null,
+      h('div', { class: 'modal-body' },
+        h('p', null, intro),
+        h('p', { style: { marginTop: '10px' } }, 'O app não junta os dois nem escolhe sozinho: você decide qual manter. Nos dois casos a outra versão fica guardada e dá para voltar.'),
+        h('ul', { class: 'muted', style: { margin: '10px 0 0 18px' } },
+          h('li', null, h('b', null, 'Manter os daqui:'), ' o Drive passa a ter os dados deste aparelho. A versão que estava no Drive fica guardada no próprio Drive (as 5 últimas, "financas-anterior-DATA.db").'),
+          h('li', null, h('b', null, 'Usar os do Drive:'), ` este aparelho recebe os dados do Drive${remoteWhen ? ` (de ${remoteWhen})` : ''}. Antes disso o app guarda uma cópia de segurança do que existe aqui, em "Antes de restaurar".`))),
+      h('div', { class: 'modal-foot' },
+        btn('Decidir depois', '', close),
+        btn('Usar os do Drive', '', () => { close(); decide('drive'); }),
+        btn('Manter os daqui', 'primary', () => { close(); decide('aqui'); }))),
+  });
+}
+
+/** Resultado de uma sincronização que rodou sozinha (ao abrir, ao voltar para o app, depois de gravar). */
+function onSyncEvent(ev) {
+  if (ev.type === 'result') {
+    const r = ev.result;
+    if (r.state === 'baixado' && !r.manual) { toast('Dados atualizados com o Drive'); refresh(); }
+    else if (r.state === 'conflito') syncConflictDialog(r);
+  }
+  document.querySelectorAll('.sync-box').forEach(b => b.repaint && b.repaint());
+}
+
+async function syncNow(button) {
+  if (button) button.disabled = true;
+  const r = await Sync.run();
+  if (button) button.disabled = false;
+  if (r.state === 'em-dia') toast('Tudo em dia com o Drive');
+  else if (r.state === 'enviado') toast('Enviado ao Drive');
+  else if (r.state === 'erro') toast(r.message, 'error');
+  else if (r.state === 'login') toast('A sessão do Google expirou. Toque em "Conectar".', 'error');
+  // 'baixado' e 'conflito' já foram tratados por onSyncEvent
+}
+
+function syncCard() {
+  if (inAndroidApp()) return null;   // o app Android não tem acesso à internet
+  const box = h('div', { class: 'card sync-box' });
+  let editingId = false;
+  box.repaint = () => {
+    const st = Sync.status();
+    const kids = [h('div', { class: 'section-title' }, 'Sincronizar com o Google Drive')];
+    kids.push(h('p', { class: 'muted', style: { marginBottom: '12px' } },
+      'Mantém o celular e o computador com os mesmos dados. Eles vão para uma pasta escondida do app no seu Drive: só este app enxerga, e não aparece na lista dos seus arquivos.'));
+    if (!st.configured || editingId) {
+      const input = h('input', { type: 'text', id: 'sync-client-id', placeholder: '1234567890-abc….apps.googleusercontent.com', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+      kids.push(h('div', { class: 'field' }, h('label', { for: 'sync-client-id' }, 'ID do cliente Google'), input,
+        h('div', { class: 'hint' }, 'Você cria uma vez no Google Cloud (passo a passo no LEIA-ME, Parte 4). No cadastro, use este endereço como "URI de redirecionamento autorizado":'),
+        h('div', { class: 'hint' }, h('code', { style: { wordBreak: 'break-all' } }, st.redirectUri))));
+      kids.push(h('div', { class: 'actions', style: { marginTop: '12px' } },
+        btn('Salvar', 'primary small', () => {
+          if (!input.value.trim()) { toast('Cole o ID do cliente.', 'error'); return; }
+          Sync.saveClientId(input.value); editingId = false; box.repaint();
+        }),
+        editingId ? btn('Cancelar', 'small', () => { editingId = false; box.repaint(); }) : null));
+    } else if (!st.connected) {
+      kids.push(h('p', { style: { marginBottom: '12px' } }, st.everConnected
+        ? 'A sessão do Google expirou (acontece a cada hora). Um toque entra de novo e a sincronização continua.'
+        : 'Pronto. Toque para entrar com a sua conta Google e autorizar o app a usar a pasta dele no Drive.'));
+      kids.push(h('div', { class: 'actions' },
+        btn('Conectar ao Google Drive', 'primary small', () => { try { Sync.connect(); } catch (e) { toast(e.message, 'error'); } }, 'link'),
+        btn('Trocar o ID do cliente', 'small', () => { editingId = true; box.repaint(); })));
+      if (st.everConnected && st.dirty) kids.push(h('p', { class: 'muted', style: { marginTop: '10px' } }, 'Há alterações deste aparelho ainda não enviadas.'));
+    } else {
+      const line = st.busy ? 'Sincronizando…'
+        : st.dirty ? 'Há alterações ainda não enviadas ao Drive.'
+        : st.lastSync ? `Em dia. Última sincronização: ${syncWhen(st.lastSync)}.` : 'Conectado.';
+      kids.push(h('p', { style: { marginBottom: '12px' } }, h('b', null, 'Conectado. '), line));
+      if (st.lastError) kids.push(h('div', { class: 'form-error', style: { marginBottom: '12px' } }, 'Última tentativa falhou: ' + st.lastError));
+      kids.push(h('div', { class: 'actions' },
+        btn('Sincronizar agora', 'primary small', e => syncNow(e.currentTarget), 'upload'),
+        btn('Desconectar', 'small', async () => {
+          if (!(await confirmDialog({ title: 'Desconectar do Drive', confirmLabel: 'Desconectar', danger: false,
+            message: 'Este aparelho deixa de sincronizar. Os dados daqui e o arquivo do Drive continuam como estão.' }))) return;
+          await Sync.disconnect(); box.repaint();
+        })));
+    }
+    kids.push(h('p', { class: 'muted', style: { marginTop: '12px', fontSize: '12px' } },
+      'Sincroniza sozinho ao abrir o app, ao voltar para ele e alguns segundos depois de cada lançamento. Regra de segurança: o app compara as versões dos dados (não as datas) e nunca troca dados novos por antigos. Se os dois lados mudarem ao mesmo tempo, ele pergunta qual manter. Isto não substitui "Salvar cópia atual": guarde cópias fora do aparelho de vez em quando.'));
+    box.replaceChildren(...kids);
+  };
+  box.repaint();
+  return box;
+}
+
+/** Aviso no topo das telas quando a sessão do Google expirou e vale a pena sincronizar. */
+function syncNotice() {
+  if (inAndroidApp()) return null;
+  const st = Sync.status();
+  if (!st.configured || st.connected || !st.everConnected) return null;
+  const stale = !st.lastSync || Date.now() - new Date(st.lastSync).getTime() > 6 * 3600 * 1000;
+  if (!st.dirty && !stale) return null;
+  return h('div', { class: 'lic-note' },
+    h('span', null, st.dirty ? 'Sincronização pausada: há alterações que ainda não foram para o Drive.' : 'Faz tempo que este aparelho não sincroniza com o Drive.'),
+    btn('Conectar', 'small', () => { try { Sync.connect(); } catch (e) { toast(e.message, 'error'); } }));
+}
+
 function firstRunWizard(settings) {
   let finished = false;
   openForm({
@@ -1649,9 +1794,13 @@ async function route() {
     if (token !== renderToken) return;
     const note = licenseNotice(licenseInfo);
     if (note) node.prepend(note);
+    const sn = syncNotice();
+    if (sn) node.prepend(sn);
     v.replaceChildren(node);
     if (!wizardChecked) {
       wizardChecked = true;
+      // conectado ao Drive: espera a primeira sincronização, que pode trazer os dados e dispensar o assistente
+      if (syncFirst) await Promise.race([syncFirst, new Promise(r => setTimeout(r, 8000))]).catch(() => {});
       try { if ((await api('GET', '/wizard')).needed) firstRunWizard(await api('GET', '/settings')); } catch { /* sem assistente */ }
     }
   } catch (e) {
@@ -1693,12 +1842,24 @@ async function boot() {
   // pede ao navegador para não apagar os dados do app por falta de uso (o iPhone pode ignorar)
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch { /* ignorar */ }
   registerOffline();
+  startSync();   // antes da primeira tela: assim o assistente de primeiro uso espera a primeira sincronização
   route();
+}
+
+let syncFirst = null;
+function startSync() {
+  if (inAndroidApp()) return;
+  Sync.onEvent(onSyncEvent);
+  const back = Sync.redirectResult;   // acabou de voltar do login do Google?
+  if (back) toast(back.ok ? 'Conectado ao Google Drive' : back.message, back.ok ? '' : 'error');
+  syncFirst = Sync.auto({ force: true });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') Sync.auto(); });
+  window.addEventListener('online', () => Sync.auto());
 }
 
 function registerOffline() {
   // guarda o app no aparelho para abrir sem internet (só funciona em HTTPS ou localhost)
-  if (!('serviceWorker' in navigator) || window.MC_DEV_BACKEND) return;
+  if (!('serviceWorker' in navigator) || window.MC_DEV_BACKEND || inAndroidApp()) return;   // no APK os arquivos já estão dentro do app
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 

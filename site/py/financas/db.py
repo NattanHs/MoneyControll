@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS transfers (
     CHECK (from_account != to_account)
 );
 
+CREATE TABLE IF NOT EXISTS sync_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS transactions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT NOT NULL,

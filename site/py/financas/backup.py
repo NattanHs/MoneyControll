@@ -11,7 +11,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from . import db
+from . import db, syncmeta
 
 AUTO_KEEP = 7       # cópias diárias mantidas (no celular o espaço é menor)
 SAFETY_KEEP = 5     # cópias de segurança feitas antes de cada restauração
@@ -135,9 +135,16 @@ def validate_backup(path: Path) -> None:
         raise ValueError("Este arquivo não é um backup válido do aplicativo.")
 
 
-def restore(conn, db_path, source: Path) -> dict:
-    """Substitui os dados atuais pelos do backup. Antes, guarda uma cópia de segurança dos dados atuais."""
+def restore(conn, db_path, source: Path, mode: str = "user") -> dict:
+    """Substitui os dados atuais pelos do backup. Antes, guarda uma cópia de segurança dos dados atuais.
+
+    mode "user" (restauração pedida pela pessoa): se o arquivo é MAIS NOVO que os dados daqui (descende deles), assume a
+    linhagem dele; senão a restauração vale como uma alteração deliberada (nova versão por cima da atual, marcada como
+    "voltada"), para que a sincronização a trate como decisão da pessoa e o Drive guarde uma cópia antes de substituí-lo.
+    mode "adopt" (sincronização baixando o Drive): assume a linhagem do arquivo, sem alterações pendentes."""
     validate_backup(source)
+    before = syncmeta.read(conn)
+    rel = syncmeta.relation(before["history"], syncmeta.file_info(source)["history"])
     folder = backup_dir(db_path)
     safety = _unique(folder, "antes")
     _snapshot(conn, safety)
@@ -148,20 +155,72 @@ def restore(conn, db_path, source: Path) -> dict:
     finally:
         src.close()
     db.init(conn)  # aplica atualizações de estrutura caso o backup seja de uma versão antiga
-    return {"safety": safety.name}
+    if mode == "adopt" or rel == "file-newer":
+        st = syncmeta.read(conn)
+        syncmeta.write(conn, st["history"], dirty=False, rewind=False)
+    else:
+        import uuid
+        syncmeta.write(conn, before["history"] + [uuid.uuid4().hex], dirty=True, rewind=True)
+    conn.commit()
+    return {"safety": safety.name, "relation": rel}
 
 
-def restore_upload(conn, db_path, b64: str) -> dict:
+def _decode(b64: str) -> bytes:
     try:
         raw = base64.b64decode(str(b64 or ""), validate=True)
     except (binascii.Error, ValueError):
         raise ValueError("Arquivo inválido.") from None
     if not raw.startswith(b"SQLite format 3\x00"):
         raise ValueError("Este arquivo não é um backup válido do aplicativo.")
+    return raw
+
+
+def restore_upload(conn, db_path, b64: str) -> dict:
+    raw = _decode(b64)
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "enviado.db"
         path.write_bytes(raw)
         return restore(conn, db_path, path)
+
+
+def inspect_upload(conn, b64: str) -> dict:
+    """Compara um arquivo enviado com os dados daqui, sem restaurar nada."""
+    raw = _decode(b64)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "enviado.db"
+        path.write_bytes(raw)
+        validate_backup(path)
+        return syncmeta.compare(conn, path)
+
+
+def inspect_backup(conn, path: Path) -> dict:
+    validate_backup(path)
+    return syncmeta.compare(conn, path)
+
+
+CHANGED_MSG = "Os dados deste aparelho mudaram durante a sincronização."
+
+
+def adopt(conn, db_path, b64: str, expect_head, force: bool = False) -> dict:
+    """Sincronização baixando o Drive. Trava no próprio Python, valendo mesmo que a tela erre:
+      - nunca troca dados por um arquivo mais antigo ou de outra linhagem (só mais novo, ou se aqui não há dado nenhum);
+      - nunca apaga alterações ainda não registradas, nem se os dados mudaram desde que a sincronização começou.
+    `force` é só para quando a pessoa escolheu "usar os do Drive" num conflito (os dados daqui ficam em "Antes de restaurar")."""
+    raw = _decode(b64)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "drive.db"
+        path.write_bytes(raw)
+        validate_backup(path)
+        cmp = syncmeta.compare(conn, path)
+        local = syncmeta.read(conn)
+        has = syncmeta.has_data(conn)
+        if not force:
+            # "pendente" só trava se houver lançamentos aqui; um aparelho recém-configurado (só conta e saldo) pode receber o Drive
+            if syncmeta.head(local["history"]) != expect_head or (local["dirty"] and has):
+                raise ValueError(CHANGED_MSG)
+            if cmp["relation"] != "file-newer" and has:
+                raise ValueError("O arquivo do Drive não é mais novo que os dados deste aparelho. Nada foi trocado.")
+        return restore(conn, db_path, path, mode="adopt")
 
 
 # ---------------------------------------------------------------- cópia fora do computador
@@ -339,12 +398,14 @@ def reset(conn, db_path, d: dict) -> dict:
         _prune(folder, "antes", SAFETY_KEEP)
     conn.commit()
     conn.execute("PRAGMA defer_foreign_keys = ON")
-    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")]
+    keep_meta = syncmeta.read(conn)   # a linhagem da sincronização não é dado do usuário: sobrevive ao reset
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != 'sync_meta'")]
     for t in tables:
         conn.execute(f'DELETE FROM "{t}"')
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_sequence'").fetchone():
         conn.execute("DELETE FROM sqlite_sequence")
     db.init(conn)  # recoloca as configurações padrão
+    syncmeta.write(conn, keep_meta["history"], dirty=True, rewind=True)
     conn.commit()
     conn.execute("VACUUM")  # remove de fato os dados antigos do arquivo
     removed = 0

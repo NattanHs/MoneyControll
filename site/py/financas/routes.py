@@ -12,7 +12,7 @@ import tempfile
 from datetime import date
 from pathlib import Path
 
-from . import accounts, analysis, backup, bank, cards, db, finance, invest, onboarding, reports
+from . import accounts, analysis, backup, bank, cards, db, finance, invest, onboarding, reports, syncmeta
 
 # o "servidor" que os handlers recebem: só precisa saber onde está o banco e que dia é hoje
 class Ctx:
@@ -76,6 +76,29 @@ def _restore_upload(c, m, b, s):
     return backup.restore_upload(c, s.db_path, b.get("data"))
 
 
+def _inspect_upload(c, m, b, s):
+    return backup.inspect_upload(c, b.get("data"))
+
+
+def _inspect_backup(c, m, b, s):
+    return backup.inspect_backup(c, backup.backup_path(s.db_path, b.get("name")))
+
+
+def _sync_state(c, m, b, s):
+    return syncmeta.state(c)
+
+
+def _sync_stamp(c, m, b, s):
+    absorb = b.get("absorb") or []
+    if not isinstance(absorb, list):
+        raise ValueError("Linhagem inválida.")
+    return syncmeta.stamp(c, [str(v) for v in absorb], bool(b.get("force")))
+
+
+def _sync_adopt(c, m, b, s):
+    return backup.adopt(c, s.db_path, b.get("data"), b.get("expect_head"), bool(b.get("force")))
+
+
 def _reset(c, m, b, s):
     return backup.reset(c, s.db_path, b)
 
@@ -135,6 +158,11 @@ ROUTES = [
     ("GET", r"/api/report/(\d{4}-\d{2})/(\d{4}-\d{2})/(all|\d+)(?:/(xlsx|csv))?", _report),
     ("POST", r"/api/backups/restore", _restore),
     ("POST", r"/api/backups/restore-upload", _restore_upload),
+    ("POST", r"/api/backups/inspect-upload", _inspect_upload),
+    ("POST", r"/api/backups/inspect", _inspect_backup),
+    ("GET", r"/api/sync/state", _sync_state),
+    ("POST", r"/api/sync/stamp", _sync_stamp),
+    ("POST", r"/api/sync/adopt", _sync_adopt),
     ("POST", r"/api/reset", _reset),
     ("GET", r"/api/license", _no_license),
     ("GET", r"/api/wizard", lambda c, m, b, s: {"needed": onboarding.needed(c)}),

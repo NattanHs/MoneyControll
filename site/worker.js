@@ -105,7 +105,11 @@ async function init() {
   py.FS.mkdirTree('/app/financas');
   await Promise.all(list.map(async file => {
     const res = await fetch('py/' + file);
-    if (!res.ok) throw new Error('Arquivo do app não encontrado: ' + file);
+    if (!res.ok) {
+      // o __init__.py pode ser vazio e alguns empacotadores o ignoram: o Python funciona sem ele
+      if (file.endsWith('__init__.py')) { py.FS.writeFile('/app/' + file, new Uint8Array(0)); return; }
+      throw new Error('Arquivo do app não encontrado: ' + file);
+    }
     py.FS.writeFile('/app/' + file, new Uint8Array(await res.arrayBuffer()));
   }));
 

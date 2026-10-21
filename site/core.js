@@ -99,11 +99,14 @@ function parseBR(raw) {
 const inputNum = n => (n == null ? '' : n.toLocaleString('pt-BR', { useGrouping: false, maximumFractionDigits: 4 }));
 
 // ------------------------------------------------------------------ API (o Python roda dentro do aparelho; ver backend.js)
+const NOT_AN_EDIT = new Set(['/backups', '/backups/inspect', '/backups/inspect-upload']);
 async function api(method, path, body) {
   const res = await Backend.request(method, '/api' + path, body);
   if (res.status < 200 || res.status >= 300) {
     throw new Error((res.body && res.body.error) || `Erro ${res.status}`);
   }
+  // qualquer gravação deixa os dados daqui "diferentes do Drive" (criar uma cópia de segurança não muda os dados)
+  if (method !== 'GET' && !NOT_AN_EDIT.has(path) && typeof Sync !== 'undefined') Sync.markDirty();
   return res.body;
 }
 
@@ -119,8 +122,44 @@ const LAST_EXPORT_KEY = 'mc_last_export';
 function lastExport() { try { return localStorage.getItem(LAST_EXPORT_KEY) || ''; } catch { return ''; } }
 function markExported() { try { localStorage.setItem(LAST_EXPORT_KEY, new Date().toISOString()); } catch { /* sem armazenamento */ } }
 
+// dentro do app Android (APK) existe a ponte window.MCAndroid; no navegador e no iPhone ela não existe
+const inAndroidApp = () => !!window.MCAndroid;
+if (inAndroidApp()) window.print = () => window.MCAndroid.print();   // "Imprimir / PDF" usa o serviço de impressão do Android
+
+function bytesToBase64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+/** No app Android: pergunta onde guardar (Downloads do aparelho ou menu Compartilhar) e chama a ponte nativa. */
+function saveFileAndroid({ name, ctype, bytes }) {
+  const b64 = bytesToBase64(bytes);
+  return new Promise(resolve => {
+    const run = (fn, okMsg) => {
+      let err = '';
+      try { err = fn(name, ctype || 'application/octet-stream', b64) || ''; } catch (e) { err = 'Não foi possível salvar: ' + e.message; }
+      if (err) toast(err, 'error'); else if (okMsg) toast(okMsg);
+      return !err;
+    };
+    modal({
+      title: 'Salvar arquivo',
+      backdropClose: true,
+      onClose: () => resolve(false),   // fechar sem escolher = não salvou (sem efeito se já respondeu)
+      build: close => h('div', null,
+        h('div', { class: 'modal-body' },
+          h('p', null, h('b', null, name)),
+          h('p', { class: 'muted', style: { marginTop: '8px' } }, 'Escolha onde guardar. "Downloads" salva no próprio aparelho; "Compartilhar" abre o menu do Android (Google Drive, e-mail, WhatsApp…).')),
+        h('div', { class: 'modal-foot' },
+          btn('Compartilhar…', '', () => { if (run((n, t, b) => window.MCAndroid.share(n, t, b), '')) { resolve(true); close(); } }),
+          btn('Salvar em Downloads', 'primary', () => { if (run((n, t, b) => window.MCAndroid.saveToDownloads(n, t, b), 'Salvo na pasta Downloads')) { resolve(true); close(); } }))),
+    });
+  });
+}
+
 /** Entrega um arquivo ao usuário: no celular abre "Compartilhar" (Salvar em Arquivos, iCloud Drive, e-mail…); no computador baixa direto. */
 async function saveFile({ name, ctype, bytes }) {
+  if (inAndroidApp()) return saveFileAndroid({ name, ctype, bytes });
   const file = new File([bytes], name, { type: ctype || 'application/octet-stream' });
   const touch = window.matchMedia && matchMedia('(pointer: coarse)').matches;
   if (touch && navigator.canShare && navigator.canShare({ files: [file] })) {

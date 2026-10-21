@@ -12,10 +12,14 @@ import traceback
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import backup, db
+from . import backup, db, syncmeta
 from .routes import ROUTES, Ctx
 
 _state = {"db_path": None, "backup_day": None}
+
+# chamadas que não são "o usuário alterou os dados": o que a sincronização e as restaurações fazem tratam do próprio estado
+_NO_DIRTY = {"/api/backups", "/api/backups/restore", "/api/backups/restore-upload", "/api/backups/inspect",
+             "/api/backups/inspect-upload", "/api/sync/state", "/api/sync/stamp", "/api/sync/adopt"}
 
 
 def start(db_path: str) -> str:
@@ -70,6 +74,8 @@ def dispatch(method: str, url: str, body: str | None, today: str) -> str:
         ctx = Ctx(db_path, today)
         with db.session(db_path) as conn:
             result = fn(conn, match, data, ctx)
+            if method != "GET" and path not in _NO_DIRTY:
+                syncmeta.mark_dirty(conn)   # há alterações aqui que ainda não viraram uma versão sincronizada
         if isinstance(result, dict) and "__file__" in result:
             out = _out_dir() / "mc-saida.bin"
             out.write_bytes(result["__file__"])
