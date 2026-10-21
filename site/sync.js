@@ -93,7 +93,8 @@ const Sync = (() => {
   /** Roda ao abrir o app: se o Google acabou de nos devolver um token (ou um erro) no endereço, guarda e limpa o endereço. */
   function handleRedirect() {
     const hash = location.hash || '';
-    if (!/^#(access_token|error)=/.test(hash)) return null;
+    // o Google pode mandar "#state=...&access_token=..." (state primeiro), então o parâmetro pode estar em qualquer posição
+    if (!/^#(?!\/)(.*&)?(access_token|error)=/.test(hash)) return null;
     const p = new URLSearchParams(hash.slice(1));
     let expected = '';
     try { expected = localStorage.getItem(NONCE_KEY) || ''; localStorage.removeItem(NONCE_KEY); } catch { /* ignorar */ }
@@ -111,6 +112,7 @@ const Sync = (() => {
     }
     // devolve o app ao endereço normal (tela de configurações) sem recarregar
     try { history.replaceState(null, '', redirectUri() + location.search + '#/config'); } catch { location.hash = '#/config'; }
+    if (!result.ok) save({ lastError: result.message });
     redirectResult = result;
     return result;
   }
@@ -140,7 +142,7 @@ const Sync = (() => {
     } catch {
       throw new Error('Sem conexão com o Google Drive.');
     }
-    if (res.status === 401) { save({ token: '', expires: 0 }); throw new AuthError('Sessão do Google expirada.'); }
+    if (res.status === 401) { save({ token: '', expires: 0, lastError: 'O Google recusou a autorização (erro 401). Conecte de novo.' }); throw new AuthError('Sessão do Google expirada.'); }
     if (!res.ok) {
       let detail = '';
       try { detail = (await res.json()).error.message; } catch { /* sem detalhe */ }

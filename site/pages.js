@@ -1716,6 +1716,7 @@ function syncCard() {
       kids.push(h('div', { class: 'actions' },
         btn('Conectar ao Google Drive', 'primary small', () => { try { Sync.connect(); } catch (e) { toast(e.message, 'error'); } }, 'link'),
         btn('Trocar o ID do cliente', 'small', () => { editingId = true; box.repaint(); })));
+      if (st.lastError) kids.push(h('div', { class: 'form-error', style: { marginTop: '12px' } }, 'Última tentativa: ' + st.lastError));
       if (st.everConnected && st.dirty) kids.push(h('p', { class: 'muted', style: { marginTop: '10px' } }, 'Há alterações deste aparelho ainda não enviadas.'));
     } else {
       const line = st.busy ? 'Sincronizando…'
