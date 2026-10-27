@@ -139,6 +139,17 @@ CREATE TABLE IF NOT EXISTS payment_marks (
     UNIQUE (source, ref_id, ym)
 );
 
+-- lançamento que quitou antes do prazo um débito (ou recebimento) já previsto: o previsto não conta de novo
+CREATE TABLE IF NOT EXISTS occurrence_links (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL CHECK (source IN ('lancamento', 'fixa', 'parcela')),
+    ref_id INTEGER NOT NULL,
+    ym     TEXT NOT NULL,
+    tx_id  INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    UNIQUE (source, ref_id, ym),
+    UNIQUE (tx_id)
+);
+
 CREATE TABLE IF NOT EXISTS budgets (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     category TEXT NOT NULL UNIQUE COLLATE NOCASE,

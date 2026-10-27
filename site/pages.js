@@ -152,7 +152,7 @@ function cardDueYm(card, iso) {
 const isPhone = () => window.matchMedia('(max-width: 640px)').matches;
 
 async function quickForm(kind0 = 'saida') {
-  const [sugg, cats] = await Promise.all([api('GET', '/suggestions').catch(() => []), categoryList()]);
+  const [sugg, cats, links] = await Promise.all([api('GET', '/suggestions').catch(() => []), categoryList(), linkOptionsFor(null)]);
   let kind = kind0, category = '';
   const count = {};
   sugg.forEach(s => { if (s.category) { const k = `${s.kind}|${s.category}`; count[k] = (count[k] || 0) + 1; } });
@@ -173,7 +173,11 @@ async function quickForm(kind0 = 'saida') {
       const error = h('div', { class: 'form-error', hidden: true });
       const seg = h('div', { class: 'segmented', role: 'group' });
       const chips = h('div', { class: 'quick-chips', role: 'group', 'aria-label': 'Categoria' });
+      const settle = h('select', { id: 'q-settle', 'aria-label': 'Quita um débito já previsto' });
       const paint = () => {
+        settle.replaceChildren(h('option', { value: '' }, kind === 'saida' ? 'Quita um débito já previsto? (opcional)' : 'Quita um recebimento já previsto? (opcional)'),
+          ...links[kind].map(o => h('option', { value: linkVal(o) }, linkText(o))));
+        settle.hidden = !links[kind].length;
         [...seg.children].forEach((b, i) => { b.className = (['saida', 'entrada'][i] === kind ? 'on ' : '') + (i === 0 ? 'out' : 'in'); });
         dl.replaceChildren(...[...new Set(sugg.filter(s => s.kind === kind).map(s => s.description))].slice(0, 60).map(d => h('option', { value: d })));
         chips.replaceChildren(...topFor(kind).map(c => h('button', { type: 'button', class: 'qchip' + (c === category ? ' on' : ''), onclick: () => { category = category === c ? '' : c; paint(); } }, c)));
@@ -191,7 +195,8 @@ async function quickForm(kind0 = 'saida') {
         if (Number.isNaN(value) || value <= 0) { error.textContent = 'Informe o valor.'; error.hidden = false; amount.focus(); return; }
         if (!date.value) { error.textContent = 'Informe a data.'; error.hidden = false; return; }
         const body = { kind, description: desc.value.trim() || category || (kind === 'saida' ? 'Gasto' : 'Recebimento'), amount: value, date: date.value,
-          category, card_id: null, repeat: 0, account_id: acct ? Number(acct.value) : null };
+          category, card_id: null, repeat: 0, account_id: acct ? Number(acct.value) : null,
+          settles: parseLink(settle.hidden ? '' : settle.value) };
         try {
           await sendTransaction(body);
           toast('Lançamento salvo');
@@ -200,7 +205,7 @@ async function quickForm(kind0 = 'saida') {
       };
       paint();
       return h('form', { novalidate: true, onsubmit: e => { e.preventDefault(); save(false); } },
-        h('div', { class: 'modal-body quick' }, seg, amount, desc, dl, chips,
+        h('div', { class: 'modal-body quick' }, seg, amount, desc, dl, settle, chips,
           h('div', { class: 'quick-row' }, date, acct), error),
         h('div', { class: 'modal-foot' }, btn('Salvar e novo', '', () => save(true)), h('button', { class: 'btn primary', type: 'submit' }, 'Salvar')));
     },
@@ -214,6 +219,7 @@ async function transactionForm(kind, existing, opts = {}) {
     api('GET', '/suggestions').catch(() => []),
   ]);
   const isNew = !existing || opts.duplicate;
+  const links = await linkOptionsFor(isNew ? null : existing.ref_id);
   let initial;
   if (existing && !opts.duplicate) initial = { ...existing };
   else if (existing) { // duplicar: mesmo lançamento, no mesmo dia do mês seguinte
@@ -226,6 +232,7 @@ async function transactionForm(kind, existing, opts = {}) {
   }
   if (initial.card_id == null) initial.card_id = '';
   initial.account_id = accountInitial(initial);
+  for (const k of ['saida', 'entrada']) { const cur = links[k].find(o => o.current); initial[`settles_${k}`] = cur ? linkVal(cur) : ''; }
   const byDesc = new Map(sugg.map(s => [`${s.kind}|${norm(s.description)}`, s]));
   openForm({
     title: existing && !opts.duplicate ? 'Editar lançamento' : opts.duplicate ? 'Duplicar lançamento' : (kind === 'entrada' ? 'Nova entrada' : 'Nova saída'),
@@ -248,11 +255,17 @@ async function transactionForm(kind, existing, opts = {}) {
       { name: 'card_id', label: 'Pago no cartão de crédito?', type: 'select', options: [{ value: '', label: 'Não, sai direto da conta' }, ...cardList.map(c => ({ value: String(c.id), label: c.name }))],
         showIf: v => v.kind === 'saida' && cardList.length > 0 },
       ...accountField('Conta', { showIf: v => !(v.kind === 'saida' && v.card_id), hint: 'De qual conta o dinheiro sai ou entra.' }),
+      ...['saida', 'entrada'].map(k => ({ name: `settles_${k}`, type: 'select',
+        label: k === 'saida' ? 'Esta saída quita um débito já previsto?' : 'Esta entrada quita um recebimento já previsto?',
+        options: [{ value: '', label: 'Não, é um lançamento novo' }, ...links[k].map(o => ({ value: linkVal(o), label: linkText(o) }))],
+        showIf: v => v.kind === k && links[k].length > 0 && !(k === 'saida' && v.card_id),
+        hint: 'Escolha o que já estava listado nos próximos meses: ele passa a constar como quitado e não é descontado de novo.' })),
       { name: 'repeat', label: 'Repetir nos próximos meses (opcional)', type: 'number', placeholder: '0', hint: 'Cria cópias nos meses seguintes, no mesmo dia. Ex.: 5 = este mês + mais 5. Para algo que não acaba, use Fixas e parcelas.',
         showIf: () => isNew },
     ],
     onSubmit: async v => {
-      const body = { ...v, card_id: v.kind === 'saida' && v.card_id ? Number(v.card_id) : null, repeat: v.repeat || 0, account_id: accountVal(v) };
+      const body = { ...v, card_id: v.kind === 'saida' && v.card_id ? Number(v.card_id) : null, repeat: v.repeat || 0, account_id: accountVal(v),
+        settles: parseLink(v.kind === 'saida' ? v.settles_saida : v.settles_entrada) };
       await api(existing && !opts.duplicate ? 'PUT' : 'POST', existing && !opts.duplicate ? `/transactions/${existing.ref_id}` : '/transactions', body);
       const card = body.card_id ? cardList.find(c => c.id === body.card_id) : null;
       if (!opts.stay) state.ym = card ? cardDueYm(card, v.date) : v.date.slice(0, 7);
@@ -290,6 +303,52 @@ function transferForm(existing) {
   });
 }
 
+// ------------------------------------------------------------------ quitar um débito (ou recebimento) já previsto
+const linkVal = o => `${o.source}|${o.ref_id}|${o.ym}`;
+const linkText = o => `${o.description} · ${dateBR(o.date)} · ${fmt(o.amount)}${o.paid ? ' · já marcada como paga' : ''}${multiAccount() && o.account_id ? ' · ' + accountName(o.account_id) : ''}`;
+const parseLink = val => { if (!val) return null; const [source, ref, ym] = String(val).split('|'); return { source, ref_id: Number(ref), ym }; };
+
+/** Débitos/recebimentos previstos que um lançamento pode quitar (txId = lançamento já existente, para mostrar o que ele quita hoje). */
+async function linkOptionsFor(txId) {
+  const suffix = txId ? `/${txId}` : '';
+  const [saida, entrada] = await Promise.all(['saida', 'entrada'].map(k => api('GET', `/link-options/${k}${suffix}`).catch(() => [])));
+  return { saida: Array.isArray(saida) ? saida : [], entrada: Array.isArray(entrada) ? entrada : [] };
+}
+
+/** Do lado do item previsto: "já paguei/recebi isso" → escolhe o lançamento que já fez o pagamento. */
+async function linkPicker(it) {
+  let res;
+  try { res = await api('POST', '/links/candidates', { source: it.source, ref_id: it.ref_id, ym: state.ym }); } catch (e) { toast(e.message, 'error'); return; }
+  const entrada = it.kind === 'entrada';
+  if (!res.candidates.length) {
+    toast(entrada ? 'Não achei nenhum recebimento já lançado perto dessa data. Lance o recebimento e escolha este item nele.'
+      : 'Não achei nenhum pagamento já lançado perto dessa data. Lance a saída e escolha este débito nela.', 'error');
+    return;
+  }
+  openForm({
+    title: entrada ? 'Já recebi: ligar a um lançamento' : 'Já paguei: ligar a um lançamento',
+    intro: `"${it.description}" · ${dateBR(res.item.date)} · ${fmt(res.item.amount)}. Escolha o lançamento que já ${entrada ? 'registrou esse recebimento' : 'pagou isso'}. `
+      + 'O item continua na lista, marcado como quitado, e o valor não é contado de novo.',
+    initial: { tx: '' },
+    fields: [{ name: 'tx', label: 'Lançamento', type: 'select',
+      options: [{ value: '', label: 'Escolha…' }, ...res.candidates.map(c => ({ value: String(c.id), label: `${dateBR(c.date)} · ${c.description} · ${fmt(c.amount)}${c.same_amount ? ' · mesmo valor' : ''}` }))] }],
+    submitLabel: 'Ligar',
+    onSubmit: async v => {
+      if (!v.tx) throw new Error('Escolha um lançamento.');
+      await api('POST', '/links', { tx_id: Number(v.tx), source: it.source, ref_id: it.ref_id, ym: state.ym });
+      toast('Ligado: este item não será contado de novo');
+      refresh();
+    },
+  });
+}
+
+async function unlinkItem(it) {
+  const ok = await confirmDialog({ title: 'Desfazer vínculo', confirmLabel: 'Desfazer', danger: false,
+    message: `Desfazer a ligação de "${it.description}" com o lançamento de ${dateBR(it.linked.date)}? O valor volta a contar neste mês.` });
+  if (!ok) return;
+  try { await api('DELETE', `/links/${it.linked.id}`); toast('Vínculo desfeito'); refresh(); } catch (e) { toast(e.message, 'error'); }
+}
+
 async function togglePaid(it, ym = state.ym, after = refresh) {
   try {
     await api('POST', '/payments', { source: it.source, ref_id: it.ref_id, ym, paid: !it.paid });
@@ -306,36 +365,45 @@ function itemRow(it) {
   else if (it.kind === 'entrada') { amount = '+ ' + fmt(it.amount); tone = 'pos'; }
   else if (it.kind === 'saida') { amount = '− ' + fmt(it.amount); tone = 'neg'; }
   else { amount = (it.amount >= 0 ? '− ' : '+ ') + fmt(Math.abs(it.amount)); tone = 'inv'; }
+  if (it.linked) { amount = (it.kind === 'entrada' ? '+ ' : '− ') + fmt(it.original_amount); tone += ' quitado'; }
   const tagChip = it.source === 'fixa' ? chip('Fixa', 'blue')
     : it.source === 'parcela' ? chip(`Parcela ${it.tag}`, 'amber')
       : it.source === 'fatura' ? chip(`Cartão · ${it.tag}`, 'blue')
         : it.source === 'dividendo' ? chip(it.tag, 'green')
           : it.source === 'invest' ? chip('Investimento', 'purple')
             : it.transfer ? chip('Transferência', 'blue') : null;
+  const doneChip = it.linked ? chip(`${it.kind === 'entrada' ? 'Recebido antes' : 'Pago antes'} · ${dateBR(it.linked.date).slice(0, 5)}`, 'green') : null;
+  const settlesChip = it.settles ? chip(`Quita ${ymShort(it.settles.ym)}`, 'blue') : null;
+  const linkTool = (label, title, fn) => h('button', { class: 'icon-btn linktool', type: 'button', title, 'aria-label': title, onclick: fn }, icon('link'), h('span', { class: 'linklabel' }, label));
+  const unlinkTool = it.linked ? linkTool('Desfazer vínculo', 'Desfazer a ligação com o lançamento', () => unlinkItem(it)) : null;
   let tools = null;
   if (it.transfer) {
     tools = h('div', { class: 'tools' },
       iconBtn('edit', 'Editar transferência', () => transferForm(it)),
       iconBtn('trash', 'Excluir transferência', () => remove(`/transfers/${it.ref_id}`, 'Excluir esta transferência? O dinheiro volta para a conta de origem.'), 'del'));
   } else if (it.source === 'lancamento') {
-    tools = h('div', { class: 'tools' },
+    tools = h('div', { class: 'tools' }, unlinkTool,
       iconBtn('copy', 'Duplicar', () => transactionForm(it.kind, it, { duplicate: true })),
       iconBtn('edit', 'Editar', () => transactionForm(it.kind, it)),
       iconBtn('trash', 'Excluir', () => remove(`/transactions/${it.ref_id}`, `Excluir "${it.description}"?`), 'del'));
   } else if (it.source === 'fatura') {
     tools = h('div', { class: 'tools' }, iconBtn('card', 'Ver compras da fatura', () => openStatement(it.ref_id, state.ym)));
   }
+  if (!tools && (it.source === 'fixa' || it.source === 'parcela') && (it.kind === 'saida' || it.kind === 'entrada')) {
+    tools = it.linked ? h('div', { class: 'tools' }, unlinkTool)
+      : (it.pending || it.manual) ? h('div', { class: 'tools' }, linkTool(it.kind === 'entrada' ? 'Já recebi' : 'Já paguei', it.kind === 'entrada' ? 'Já recebi: ligar a um lançamento' : 'Já paguei: ligar a um lançamento', () => linkPicker(it))) : null;
+  }
   const payBtn = it.kind === 'saida' && !it.transfer
     ? h('button', { class: 'pay-btn' + (it.paid ? ' on' : ''), type: 'button', 'aria-pressed': String(!!it.paid),
-      title: it.paid ? 'Paga. Clique para marcar como não paga' : 'A pagar. Clique para marcar como paga',
-      'aria-label': it.paid ? 'Marcar como não paga' : 'Marcar como paga', onclick: () => togglePaid(it) }, icon('check'))
+      title: it.linked ? 'Quitado antes por um lançamento' : it.paid ? 'Paga. Clique para marcar como não paga' : 'A pagar. Clique para marcar como paga',
+      'aria-label': it.paid ? 'Marcar como não paga' : 'Marcar como paga', onclick: () => (it.linked ? toast('Já quitado por um lançamento. Desfaça a ligação para mudar.') : togglePaid(it)) }, icon('check'))
     : null;
   const acct = multiAccount() && !state.account && !it.transfer && it.account_id ? chip(accountName(it.account_id)) : null;
   const status = it.reconciled ? chip('Conciliado', 'green') : it.transfer ? null : it.kind === 'entrada' ? (it.pending ? chip('A receber', 'amber') : null) : it.kind === 'saida' ? (it.pending ? chip('A pagar', 'amber') : null) : null;
   return h('div', { class: 'row' + (it.pending ? ' pending' : '') },
     h('div', { class: `ico ${cls}` }, icon(ic)),
     h('div', { class: 'main-col' }, h('div', { class: 'title' }, it.description),
-      h('div', { class: 'meta' }, status, tagChip, acct, it.category && !['invest', 'dividendo', 'fatura', 'transferencia', 'transf_saida', 'transf_entrada'].includes(it.source) ? chip(it.category) : null)),
+      h('div', { class: 'meta' }, status, doneChip, settlesChip, tagChip, acct, it.category && !['invest', 'dividendo', 'fatura', 'transferencia', 'transf_saida', 'transf_entrada'].includes(it.source) ? chip(it.category) : null)),
     h('div', { class: `amount ${tone}` }, amount), h('div', { class: 'pay-slot' }, payBtn), tools || h('div', { class: 'tools-spacer' }));
 }
 

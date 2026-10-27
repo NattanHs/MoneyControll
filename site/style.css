@@ -386,3 +386,10 @@ a.btn { text-decoration: none; color: inherit; }
 .boot p { max-width: 320px; }
 .spinner { width: 34px; height: 34px; border-radius: 50%; border: 3px solid var(--border); border-top-color: var(--primary); animation: mc-spin .9s linear infinite; }
 @keyframes mc-spin { to { transform: rotate(360deg); } }
+
+/* item previsto já quitado antes do prazo por outro lançamento: aparece, mas não conta */
+.amount.quitado { text-decoration: line-through; opacity: .55; }
+/* botão de ligar: no celular mostra o texto ao lado do ícone */
+.linklabel { display: none; }
+@media (max-width: 640px) { .icon-btn.linktool { width: auto; padding: 0 10px; gap: 6px; display: inline-flex; align-items: center; color: var(--text); }
+  .linktool .linklabel { display: inline; font-size: 13px; font-weight: 650; } }

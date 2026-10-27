@@ -171,6 +171,12 @@ ROUTES = [
     ("GET", r"/api/suggestions", lambda c, m, b, s: finance.suggestions(c)),
     # pago / a pagar
     ("POST", r"/api/payments", lambda c, m, b, s: finance.set_payment(c, b, s.today)),
+    # quitar antes do prazo: um lançamento aponta o débito (ou recebimento) previsto que ele paga
+    ("GET", r"/api/link-options/(entrada|saida)(?:/(\d+))?",
+     lambda c, m, b, s: finance.link_options(c, m.group(1), s.today, int(m.group(2)) if m.group(2) else None)),
+    ("POST", r"/api/links/candidates", lambda c, m, b, s: finance.link_candidates(c, b, s.today)),
+    ("POST", r"/api/links", lambda c, m, b, s: finance.add_link(c, b)),
+    ("DELETE", r"/api/links/(\d+)", _do(finance.remove_link)),
     # orçamento por categoria
     ("GET", r"/api/budgets", lambda c, m, b, s: finance.list_budgets(c)),
     ("POST", r"/api/budgets", _create(finance.save_budget)),

@@ -7,6 +7,7 @@ from .common import amount_at, month_day, ym_add, ym_diff  # noqa: F401  (reexpo
 
 KINDS = ("entrada", "saida")
 PAY_SOURCES = ("lancamento", "fixa", "parcela", "fatura")
+LINKABLE = ("lancamento", "fixa", "parcela")  # o que pode ser quitado antes do prazo por outro lançamento
 WARN_AT = 80  # % do orçamento a partir do qual a categoria entra em alerta
 
 
@@ -32,6 +33,7 @@ def _delete(conn, table: str, id: int) -> None:
 
 def _clear_item(conn, source: str, ref_type: str | None, id: int) -> None:
     conn.execute("DELETE FROM payment_marks WHERE source = ? AND ref_id = ?", (source, id))
+    conn.execute("DELETE FROM occurrence_links WHERE source = ? AND ref_id = ?", (source, id))
     if ref_type:
         conn.execute("DELETE FROM amount_changes WHERE ref_type = ? AND ref_id = ?", (ref_type, id))
 
@@ -53,6 +55,10 @@ def save_transaction(conn, d: dict, id: int | None = None) -> int:
     if id is None and d.get("repeat") not in (None, "", 0, "0"):
         repeat = v.integer(d, "repeat", "A repetição", 0, 60)
     first = _save(conn, "transactions", row, id)
+    if "settles" in d:  # quita um débito (ou recebimento) previsto; None desfaz o vínculo
+        set_settlement(conn, first, d.get("settles"))
+    elif id is not None:
+        _revalidate_settlement(conn, first)
     day = int(row["date"][8:10])
     for k in range(1, repeat + 1):  # cópias nos meses seguintes, mesmo dia (ajustado em meses curtos)
         _save(conn, "transactions", dict(row, date=month_day(ym_add(row["date"][:7], k), day)))
@@ -230,6 +236,9 @@ def set_payment(conn, d: dict, today: str) -> dict:
     ref_id = v.integer(d, "ref_id", "O item")
     ym = v.month(d, "ym", "o mês")
     paid = v.boolean(d, "paid", True)
+    if conn.execute("SELECT 1 FROM occurrence_links WHERE source = ? AND ref_id = ? AND ym = ?",
+                    (source, ref_id, ym)).fetchone():
+        raise ValueError("Esse item já foi quitado por um lançamento. Desfaça o vínculo para mudar.")
     default = 1 if _default_date(conn, source, ref_id, ym) <= today else 0
     if paid == default:  # volta ao automático
         conn.execute("DELETE FROM payment_marks WHERE source = ? AND ref_id = ? AND ym = ?", (source, ref_id, ym))
@@ -238,6 +247,129 @@ def set_payment(conn, d: dict, today: str) -> dict:
             "INSERT INTO payment_marks(source, ref_id, ym, paid) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(source, ref_id, ym) DO UPDATE SET paid = excluded.paid", (source, ref_id, ym, paid))
     return {"paid": bool(paid)}
+
+
+# ---------------------------------------------------------------- quitar débito previsto com um lançamento
+
+def _link_target(d: dict) -> tuple[str, int, str]:
+    return (v.choice(d, "source", "A origem", LINKABLE), v.integer(d, "ref_id", "O item"), v.month(d, "ym", "o mês"))
+
+
+def _find_item(data: dict, source: str, ref_id: int, ym: str, today: str) -> dict | None:
+    return next((i for i in items_for_month(data, ym, today)
+                 if i["source"] == source and i["ref_id"] == ref_id and not i.get("transfer")), None)
+
+
+def set_settlement(conn, tx_id: int, target) -> None:
+    """Diz que o lançamento `tx_id` já quitou o débito (ou recebimento) previsto `target`.
+
+    O previsto continua na lista do mês dele, marcado como quitado, mas com valor zero: o dinheiro
+    movimenta o saldo uma vez só, na data do lançamento. `target` vazio desfaz o vínculo."""
+    conn.execute("DELETE FROM occurrence_links WHERE tx_id = ?", (tx_id,))
+    if not target:
+        return
+    if not isinstance(target, dict):
+        raise ValueError("Débito previsto inválido.")
+    source, ref_id, ym = _link_target(target)
+    data = load_all(conn)
+    tx = next((t for t in data["transactions"] if t["id"] == tx_id), None)
+    if tx is None:
+        raise ValueError("Lançamento não encontrado.")
+    if tx.get("card_id"):
+        raise ValueError("Compra no cartão não quita débito direto da conta. Marque a fatura como paga.")
+    if source == "lancamento" and ref_id == tx_id:
+        raise ValueError("Um lançamento não pode quitar a si mesmo.")
+    item = _find_item(data, source, ref_id, ym, "9999-12-31")
+    if item is None:
+        raise ValueError("Esse débito não existe nesse mês.")
+    if item.get("linked"):
+        raise ValueError("Esse débito já foi quitado por outro lançamento.")
+    if item["kind"] != tx["kind"]:
+        raise ValueError("O lançamento e o débito precisam ser do mesmo tipo (os dois entrada ou os dois saída).")
+    if item["account_id"] != tx["account_id"]:
+        raise ValueError("O lançamento e o débito estão em contas diferentes.")
+    conn.execute("DELETE FROM payment_marks WHERE source = ? AND ref_id = ? AND ym = ?", (source, ref_id, ym))
+    conn.execute("INSERT INTO occurrence_links(source, ref_id, ym, tx_id) VALUES (?, ?, ?, ?)",
+                 (source, ref_id, ym, tx_id))
+
+
+def _revalidate_settlement(conn, tx_id: int) -> None:
+    """Depois de editar um lançamento, desfaz o vínculo se ele deixou de fazer sentido (tipo, conta, cartão)."""
+    row = conn.execute("SELECT source, ref_id, ym FROM occurrence_links WHERE tx_id = ?", (tx_id,)).fetchone()
+    if row is None:
+        return
+    try:
+        set_settlement(conn, tx_id, dict(row))
+    except ValueError:
+        conn.execute("DELETE FROM occurrence_links WHERE tx_id = ?", (tx_id,))
+
+
+def add_link(conn, d: dict) -> dict:
+    set_settlement(conn, v.integer(d, "tx_id", "O lançamento"), d)
+    return {"ok": True}
+
+
+def remove_link(conn, id: int) -> None:
+    _delete(conn, "occurrence_links", id)
+
+
+def link_options(conn, kind: str, today: str, tx_id: int | None = None) -> list[dict]:
+    """Débitos (ou recebimentos) previstos que um lançamento deste tipo pode quitar: os ainda a pagar/receber
+    ou marcados como pagos à mão, do mês anterior a daqui a 3 meses. O que `tx_id` já quita aparece como 'current'."""
+    if kind not in KINDS:
+        raise ValueError("O tipo é inválido.")
+    data = load_all(conn)
+    mine = next((l for l in data["links"].values() if tx_id and l["tx_id"] == tx_id), None)
+    out = []
+    for k in range(5):
+        ym = ym_add(ym_add(today[:7], -1), k)
+        for i in items_for_month(data, ym, today):
+            if i["source"] not in LINKABLE or i.get("transfer") or i["kind"] != kind:
+                continue
+            if i["source"] == "lancamento" and i["ref_id"] == tx_id:
+                continue
+            current = bool(mine and (mine["source"], mine["ref_id"], mine["ym"]) == (i["source"], i["ref_id"], ym))
+            if i.get("linked") and not current:
+                continue
+            if not (current or i["pending"] or i.get("manual")):
+                continue
+            out.append({"source": i["source"], "ref_id": i["ref_id"], "ym": ym, "date": i["date"],
+                        "description": i["description"], "category": i["category"],
+                        "amount": i.get("original_amount", i["amount"]), "account_id": i["account_id"],
+                        "paid": bool(i.get("paid")) and not i.get("linked"), "current": current})
+    out.sort(key=lambda o: (o["date"], o["description"].lower()))
+    return out
+
+
+def link_candidates(conn, d: dict, today: str) -> dict:
+    """Lançamentos já feitos que poderiam ter quitado o débito `d` (mesmo tipo e conta, sem cartão, ainda sem vínculo),
+    com os de mesmo valor primeiro. Janela: de 90 dias antes a 31 dias depois do vencimento."""
+    from datetime import date as _date
+    source, ref_id, ym = _link_target(d)
+    data = load_all(conn)
+    item = _find_item(data, source, ref_id, ym, today)
+    if item is None:
+        raise ValueError("Esse débito não existe nesse mês.")
+    if item.get("linked"):
+        raise ValueError("Esse débito já foi quitado por um lançamento.")
+    amount = item["amount"]
+    used = {l["tx_id"] for l in data["links"].values()}
+    due = _date.fromisoformat(item["date"])
+    cands = []
+    for t in data["transactions"]:
+        if t["kind"] != item["kind"] or t.get("card_id") or t["id"] in used or t["account_id"] != item["account_id"]:
+            continue
+        if source == "lancamento" and t["id"] == ref_id:
+            continue
+        gap = (_date.fromisoformat(t["date"]) - due).days
+        if gap < -90 or gap > 31:
+            continue
+        cands.append({"id": t["id"], "date": t["date"], "description": t["description"], "category": t["category"],
+                      "amount": t["amount"], "same_amount": abs(t["amount"] - amount) < 0.005, "gap": abs(gap)})
+    cands.sort(key=lambda c: (not c["same_amount"], c["gap"], c["date"]))
+    return {"item": {"source": source, "ref_id": ref_id, "ym": ym, "description": item["description"],
+                     "date": item["date"], "amount": amount, "kind": item["kind"]},
+            "candidates": cands[:40]}
 
 
 # ---------------------------------------------------------------- orçamento por categoria
@@ -305,6 +437,7 @@ def load_all(conn) -> dict:
         "installments": own(installments),
         "cards": cards_,
         "marks": {(m["source"], m["ref_id"], m["ym"]): m["paid"] for m in db.rows(conn, "SELECT * FROM payment_marks")},
+        "links": {(l["source"], l["ref_id"], l["ym"]): l for l in db.rows(conn, "SELECT * FROM occurrence_links")},
         "budgets": list_budgets(conn),
         "recon": {(r["source"], r["ref_id"], r["ym"]) for r in db.rows(conn, "SELECT source, ref_id, ym FROM bank_links")},
         "ops": own(db.rows(conn, "SELECT o.*, a.ticker FROM asset_ops o JOIN assets a ON a.id = o.asset_id")),
@@ -392,12 +525,26 @@ def items_for_month(data: dict, ym: str, today: str, account: int | None = None)
         items = [i for i in items if i["account_id"] == account or i.get("source") in ("transf_saida", "transf_entrada")]
     marks = data.get("marks", {})
     recon = data.get("recon", set())
+    links = data.get("links", {})
+    settlers = {l["tx_id"]: l for l in links.values()}
+    txs = {t["id"]: t for t in data["transactions"]} if links else {}
     for i in items:
         if i.get("transfer"):
             i["reconciled"] = (i["source"], i["ref_id"], ym) in recon
             i["paid"], i["pending"], i["manual"] = True, False, False
             continue
         i["reconciled"] = (i["source"], i["ref_id"], ym) in recon
+        link = links.get((i["source"], i["ref_id"], ym))
+        if link:  # já quitado antes do prazo por outro lançamento: aparece, mas não conta de novo
+            tx = txs.get(link["tx_id"]) or {}
+            i["original_amount"], i["amount"] = i["amount"], 0.0
+            i["paid"], i["pending"], i["manual"] = True, False, False
+            i["linked"] = {"id": link["id"], "tx_id": link["tx_id"], "date": tx.get("date"),
+                           "amount": tx.get("amount"), "description": tx.get("description", "")}
+            continue
+        if i["source"] == "lancamento" and i["ref_id"] in settlers:
+            s_ = settlers[i["ref_id"]]
+            i["settles"] = {"link_id": s_["id"], "source": s_["source"], "ref_id": s_["ref_id"], "ym": s_["ym"]}
         if i["kind"] == "saida":
             mark = marks.get((i["source"], i["ref_id"], ym))
             i["paid"] = bool(mark) if mark is not None else i["date"] <= today

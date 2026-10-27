@@ -56,6 +56,23 @@ computador, é o caminho inverso: **Salvar cópia atual** no iPhone e **Restaura
 - Não use "Limpar histórico e dados de sites" no Safari sem antes salvar uma cópia, e não remova o ícone sem salvar.
 - Relatórios em Excel/CSV usam o mesmo menu de compartilhar.
 
+## Pagou ou recebeu antes do prazo?
+
+Quando você paga (ou recebe) adiantado algo que já estava previsto para os próximos meses (conta fixa, parcela ou lançamento futuro),
+lance o pagamento normalmente, na data em que ele aconteceu, e **aponte o que ele quita**. Sem isso o valor contaria duas vezes
+(uma na data do pagamento, outra no mês do vencimento).
+
+- **Ao registrar** uma saída ou entrada (lançamento rápido ou formulário completo), escolha o item previsto no campo
+  *Quita um débito já previsto?* (ou *um recebimento já previsto?*).
+- **Num lançamento que você já fez**: toque em *Editar* e escolha o item no mesmo campo.
+- **Pelo item previsto**: em *Mês a mês*, no mês do vencimento, toque em **Já paguei** (ou **Já recebi**) e escolha o lançamento. O app
+  mostra primeiro os de mesmo valor; ele nunca liga nada sozinho.
+
+O item previsto continua na lista do mês dele, marcado como **Pago antes · dd/mm**, riscado e valendo zero no saldo: o dinheiro movimenta
+o saldo uma vez só, na data do lançamento. **Desfazer vínculo** volta tudo ao normal; se o lançamento for apagado, o item previsto volta a contar.
+Não vale para compra no cartão (marque a fatura como paga) nem entre contas diferentes. Quem já tinha marcado o item como pago à mão
+em duas etapas pode ligar agora, sem refazer nada: a marca manual é substituída pelo vínculo.
+
 ## Atualizar o app no futuro
 
 Se eu te enviar uma versão nova, é só subir os arquivos no GitHub (**Add file → Upload files** sobre o repositório). Ele publica
