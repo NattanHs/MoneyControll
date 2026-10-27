@@ -129,6 +129,18 @@ CREATE TABLE IF NOT EXISTS credit_cards (
     due_day     INTEGER NOT NULL CHECK (due_day BETWEEN 1 AND 31)
 );
 
+-- pagamentos (parciais ou adiantados) de uma fatura: saem da conta na data do pagamento e abatem a fatura
+CREATE TABLE IF NOT EXISTS invoice_payments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id    INTEGER NOT NULL REFERENCES credit_cards(id) ON DELETE CASCADE,
+    ym         TEXT NOT NULL,
+    date       TEXT NOT NULL,
+    amount     REAL NOT NULL CHECK (amount > 0),
+    account_id INTEGER,
+    note       TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_invpay_card ON invoice_payments(card_id, ym);
+
 -- marca manual de pago / não pago (sem marca: pago quando a data já chegou)
 CREATE TABLE IF NOT EXISTS payment_marks (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,

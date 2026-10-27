@@ -506,7 +506,7 @@ def reconcile(conn, tid: int, d: dict, today: str, ctx: _Ctx | None = None) -> d
     t = _one(conn, tid)
     if t["status"] != "pendente":
         raise ValueError("Esta linha do extrato já foi tratada.")
-    source = v.choice(d, "source", "A origem", ("lancamento", "fixa", "parcela", "fatura", "dividendo", "invest", "transf_saida", "transf_entrada"))
+    source = v.choice(d, "source", "A origem", ("lancamento", "fixa", "parcela", "fatura", "pag_fatura", "dividendo", "invest", "transf_saida", "transf_entrada"))
     ref_id, ym = v.integer(d, "ref_id", "O lançamento"), v.month(d, "ym", "o mês")
     ctx = ctx or _Ctx(conn, today)
     item = ctx.find(t, source, ref_id, ym)
@@ -583,7 +583,7 @@ def reconcile_group(conn, d: dict, today: str) -> dict:
     for r in refs:
         if not isinstance(r, dict):
             raise ValueError("Lançamento inválido.")
-        source = v.choice(r, "source", "A origem", ("lancamento", "fixa", "parcela", "fatura", "dividendo", "invest", "transf_saida", "transf_entrada"))
+        source = v.choice(r, "source", "A origem", ("lancamento", "fixa", "parcela", "fatura", "pag_fatura", "dividendo", "invest", "transf_saida", "transf_entrada"))
         ref_id, ym = v.integer(r, "ref_id", "O lançamento"), v.month(r, "ym", "o mês")
         if (source, ref_id, ym) in keys:
             raise ValueError("Há lançamentos repetidos na seleção.")

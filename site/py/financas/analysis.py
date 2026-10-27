@@ -44,7 +44,7 @@ def _period(data: dict, months: list[str], today: str, account: int | None) -> d
             cat_total[c["category"]] = cat_total.get(c["category"], 0.0) + c["total"]
             cat_by_month.setdefault(c["category"], {})[ym] = c["total"]
         for i in items:
-            if i["kind"] != "saida" or i.get("transfer"):
+            if i["kind"] != "saida" or i.get("transfer") or i.get("invoice_payment"):
                 continue
             if i["source"] == "fatura":
                 card = next((c for c in data["cards"] if c["id"] == i["ref_id"]), None)

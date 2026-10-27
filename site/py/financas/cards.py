@@ -48,6 +48,12 @@ def statement_lines(data: dict, card: dict, ym: str) -> list[dict]:
     return lines
 
 
+def prepayments(data: dict, card_id: int, ym: str) -> list[dict]:
+    """Pagamentos parciais ou adiantados já registrados para a fatura do cartão que vence em ym."""
+    return sorted((p for p in data.get("inv_pays", []) if p["card_id"] == card_id and p["ym"] == ym),
+                  key=lambda p: (p["date"], p["id"]))
+
+
 def statement_item(data: dict, card: dict, ym: str) -> dict | None:
     lines = statement_lines(data, card, ym)
     if not lines:
@@ -55,10 +61,19 @@ def statement_item(data: dict, card: dict, ym: str) -> dict | None:
     parts: dict[str, float] = {}
     for l in lines:
         parts[l["category"]] = parts.get(l["category"], 0.0) + l["amount"]
-    return {"source": "fatura", "ref_id": card["id"], "date": month_day(ym, card["due_day"]),
+    total = round(sum(l["amount"] for l in lines), 2)
+    pays = prepayments(data, card["id"], ym)
+    paid_amt = round(sum(p["amount"] for p in pays), 2)
+    item = {"source": "fatura", "ref_id": card["id"], "date": month_day(ym, card["due_day"]),
             "description": f"Fatura {card['name']}", "category": "Cartão de crédito", "kind": "saida",
-            "amount": round(sum(l["amount"] for l in lines), 2), "tag": f"{len(lines)} compra(s)",
+            "amount": total, "tag": f"{len(lines)} compra(s)",
             "parts": [{"category": k, "amount": round(a, 2)} for k, a in parts.items()]}
+    if paid_amt:  # pagamentos parciais/adiantados já saíram da conta: só o restante vence
+        item.update(original_amount=total, prepaid_total=paid_amt, amount=max(0.0, round(total - paid_amt, 2)),
+                    prepaid=[{"id": p["id"], "date": p["date"], "amount": p["amount"]} for p in pays])
+        if paid_amt - total > 0.004:
+            item["excess"] = round(paid_amt - total, 2)
+    return item
 
 
 # ---------------------------------------------------------------- cadastro
@@ -85,6 +100,7 @@ def delete_card(conn, id: int) -> None:
     if used:
         raise ValueError(f"Este cartão tem {used} compra(s) lançada(s). Exclua ou mude essas compras antes.")
     conn.execute("DELETE FROM payment_marks WHERE source = 'fatura' AND ref_id = ?", (id,))
+    conn.execute("DELETE FROM invoice_payments WHERE card_id = ?", (id,))
     finance._delete(conn, "credit_cards", id)
 
 
@@ -118,9 +134,13 @@ def list_cards(conn, today: str) -> list[dict]:
             total = round(sum(l["amount"] for l in lines), 2)
             if total or ym == open_ym:
                 paid = data["marks"].get(("fatura", card["id"], ym))
+                paid_amt = round(sum(p["amount"] for p in prepayments(data, card["id"], ym)), 2)
+                remaining = max(0.0, round(total - paid_amt, 2))
+                is_paid = default_paid(card, ym, today) if paid is None else bool(paid)
                 statements.append({"ym": ym, "total": total, "count": len(lines),
                                    "due_date": month_day(ym, card["due_day"]),
-                                   "paid": default_paid(card, ym, today) if paid is None else bool(paid),
+                                   "paid_amount": paid_amt, "remaining": remaining,
+                                   "paid": True if (total and paid_amt and remaining <= 0.004) else is_paid,
                                    "open": ym == open_ym})
         out.append({**card, "open_ym": open_ym, "statements": statements})
     return out
@@ -135,11 +155,64 @@ def statement(conn, card_id: int, ym: str, today: str) -> dict:
         raise ValueError("Cartão não encontrado.")
     lines = statement_lines(data, card, ym)
     mark = data["marks"].get(("fatura", card_id, ym))
+    total = round(sum(l["amount"] for l in lines), 2)
+    pays = prepayments(data, card_id, ym)
+    paid_amt = round(sum(p["amount"] for p in pays), 2)
+    remaining = max(0.0, round(total - paid_amt, 2))
+    is_paid = default_paid(card, ym, today) if mark is None else bool(mark)
     return {
         "card": card, "ym": ym,
         "due_date": month_day(ym, card["due_day"]),
         "closing_date": month_day(closing_month_for_due(card, ym), card["closing_day"]),
-        "total": round(sum(l["amount"] for l in lines), 2),
-        "paid": default_paid(card, ym, today) if mark is None else bool(mark),
+        "total": total,
+        "paid_amount": paid_amt, "remaining": remaining,
+        "paid": True if (total and paid_amt and remaining <= 0.004) else is_paid,
+        "payments": [{"id": p["id"], "date": p["date"], "amount": p["amount"], "account_id": p["account_id"], "note": p["note"]} for p in pays],
         "lines": lines,
     }
+
+
+# ---------------------------------------------------------------- pagamento parcial ou adiantado da fatura
+
+def _brl(x: float) -> str:
+    return "R$ " + f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def save_payment(conn, d: dict, today: str, id: int | None = None) -> int:
+    """Registra um pagamento (parcial ou total, no vencimento ou antes) de uma fatura.
+
+    O dinheiro sai da conta na data informada; a fatura que vence em `ym` passa a cobrar só o restante.
+    """
+    from . import finance
+    if id is not None:  # ao editar, cartão e fatura não mudam
+        old = conn.execute("SELECT card_id, ym FROM invoice_payments WHERE id = ?", (id,)).fetchone()
+        if old is None:
+            raise ValueError("Registro não encontrado.")
+        d = {**d, "card_id": old[0], "ym": old[1]}
+    card_id = check_card(conn, d.get("card_id"))
+    if card_id is None:
+        raise ValueError("Escolha o cartão.")
+    ym = v.month(d, "ym", "o mês da fatura")
+    amount = round(v.number(d, "amount", "O valor"), 2)
+    date_iso = v.iso_date(d, "date", "a data do pagamento")
+    data = finance.load_all(conn)
+    card = next(c for c in data["cards"] if c["id"] == card_id)
+    account = accounts.check_account(conn, d.get("account_id") or card["pay_account_id"])
+    total = round(sum(l["amount"] for l in statement_lines(data, card, ym)), 2)
+    if total <= 0:
+        raise ValueError("Esta fatura não tem compras.")
+    other = round(sum(p["amount"] for p in prepayments(data, card_id, ym) if p["id"] != id), 2)
+    remaining = round(total - other, 2)
+    if amount > remaining + 0.004:
+        raise ValueError(f"O pagamento passa do que falta na fatura ({_brl(max(remaining, 0.0))}).")
+    row = {"card_id": card_id, "ym": ym, "date": date_iso, "amount": amount, "account_id": account,
+           "note": v.text(d, "note", "a observação", required=False, maxlen=80)}
+    new_id = finance._save(conn, "invoice_payments", row, id)
+    if round(total - other - amount, 2) <= 0.004:  # quitou a fatura: a marca manual deixaria de fazer sentido
+        conn.execute("DELETE FROM payment_marks WHERE source = 'fatura' AND ref_id = ? AND ym = ?", (card_id, ym))
+    return new_id
+
+
+def delete_payment(conn, id: int) -> None:
+    from . import finance
+    finance._delete(conn, "invoice_payments", id)

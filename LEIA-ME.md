@@ -73,6 +73,15 @@ o saldo uma vez só, na data do lançamento. **Desfazer vínculo** volta tudo ao
 Não vale para compra no cartão (marque a fatura como paga) nem entre contas diferentes. Quem já tinha marcado o item como pago à mão
 em duas etapas pode ligar agora, sem refazer nada: a marca manual é substituída pelo vínculo.
 
+## Pagar a fatura do cartão aos poucos ou adiantado
+
+Dá para pagar **só uma parte** da fatura, ou toda ela **antes do vencimento**, sem contar o valor duas vezes. Em *Mês a mês*, no mês do vencimento, toque em
+**Pagar parte** na linha da fatura (ou abra a fatura pelo ícone do cartão e use **Pagar parte** / **Pagar o restante**). Informe valor, data do pagamento e conta.
+
+O pagamento **sai da conta na data escolhida** (aparece como "Pagamento da fatura…") e a fatura passa a cobrar **só o que sobrou** no vencimento ("Já pago R$ x de R$ y").
+Pagando tudo, a fatura fica quitada. Dá para editar ou excluir pagamentos; ao excluir, o valor volta a ser cobrado. O pagamento não é gasto novo: as compras já contam nas
+categorias e no orçamento. Não dá para pagar mais do que falta. *Marcar como paga* no vencimento paga só o restante. Na *Conciliação*, a linha do banco pode ser ligada ao pagamento registrado.
+
 ## Atualizar o app no futuro
 
 Se eu te enviar uma versão nova, é só subir os arquivos no GitHub (**Add file → Upload files** sobre o repositório). Ele publica

@@ -206,6 +206,9 @@ ROUTES = [
     ("DELETE", r"/api/cards/(\d+)", _do(cards.delete_card)),
     ("GET", r"/api/cards/(\d+)/statement/(\d{4}-\d{2})",
      lambda c, m, b, s: cards.statement(c, int(m.group(1)), m.group(2), s.today)),
+    ("POST", r"/api/cards/(\d+)/payments", lambda c, m, b, s: {"id": cards.save_payment(c, {**b, "card_id": int(m.group(1))}, s.today)}),
+    ("PUT", r"/api/invoice-payments/(\d+)", lambda c, m, b, s: (cards.save_payment(c, b, s.today, int(m.group(1))), ok())[1]),
+    ("DELETE", r"/api/invoice-payments/(\d+)", _do(cards.delete_payment)),
     # lançamentos
     ("POST", r"/api/transactions", lambda c, m, b, s: _create_tx(c, b)),
     ("PUT", r"/api/transactions/(\d+)", _update(finance.save_transaction)),

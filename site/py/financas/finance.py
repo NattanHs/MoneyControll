@@ -239,6 +239,12 @@ def set_payment(conn, d: dict, today: str) -> dict:
     if conn.execute("SELECT 1 FROM occurrence_links WHERE source = ? AND ref_id = ? AND ym = ?",
                     (source, ref_id, ym)).fetchone():
         raise ValueError("Esse item já foi quitado por um lançamento. Desfaça o vínculo para mudar.")
+    if source == "fatura":
+        data = load_all(conn)
+        card = next((c for c in data["cards"] if c["id"] == ref_id), None)
+        st = cards.statement_item(data, card, ym) if card else None
+        if st and st.get("prepaid_total") and st["amount"] <= 0.004:
+            raise ValueError("Esta fatura já foi quitada pelos pagamentos registrados. Exclua um pagamento para mudar.")
     default = 1 if _default_date(conn, source, ref_id, ym) <= today else 0
     if paid == default:  # volta ao automático
         conn.execute("DELETE FROM payment_marks WHERE source = ? AND ref_id = ? AND ym = ?", (source, ref_id, ym))
@@ -438,6 +444,7 @@ def load_all(conn) -> dict:
         "cards": cards_,
         "marks": {(m["source"], m["ref_id"], m["ym"]): m["paid"] for m in db.rows(conn, "SELECT * FROM payment_marks")},
         "links": {(l["source"], l["ref_id"], l["ym"]): l for l in db.rows(conn, "SELECT * FROM occurrence_links")},
+        "inv_pays": own(db.rows(conn, "SELECT * FROM invoice_payments")),
         "budgets": list_budgets(conn),
         "recon": {(r["source"], r["ref_id"], r["ym"]) for r in db.rows(conn, "SELECT source, ref_id, ym FROM bank_links")},
         "ops": own(db.rows(conn, "SELECT o.*, a.ticker FROM asset_ops o JOIN assets a ON a.id = o.asset_id")),
@@ -485,6 +492,12 @@ def items_for_month(data: dict, ym: str, today: str, account: int | None = None)
         if st:
             st["account_id"] = card["pay_account_id"]
             items.append(st)
+    card_names = {c["id"]: c["name"] for c in data["cards"]}
+    for p in data.get("inv_pays", []):
+        if p["date"][:7] == ym:
+            items.append(_item("pag_fatura", p["id"], p["date"], f"Pagamento da fatura {card_names.get(p['card_id'], '')}".strip(),
+                               "Cartão de crédito", "saida", p["amount"], "Pgto. de fatura", account_id=p["account_id"],
+                               card_id=p["card_id"], invoice_ym=p["ym"], note=p["note"], invoice_payment=True))
     for o in data["ops"]:
         if o["affects_cash"] and o["date"][:7] == ym:
             gross = o["quantity"] * o["price"]
@@ -541,6 +554,9 @@ def items_for_month(data: dict, ym: str, today: str, account: int | None = None)
             i["paid"], i["pending"], i["manual"] = True, False, False
             i["linked"] = {"id": link["id"], "tx_id": link["tx_id"], "date": tx.get("date"),
                            "amount": tx.get("amount"), "description": tx.get("description", "")}
+            continue
+        if i["source"] == "fatura" and i.get("prepaid_total") and i["amount"] <= 0.004:  # quitada só com pagamentos antecipados
+            i["paid"], i["pending"], i["manual"], i["fully_prepaid"] = True, False, False, True
             continue
         if i["source"] == "lancamento" and i["ref_id"] in settlers:
             s_ = settlers[i["ref_id"]]
@@ -622,8 +638,8 @@ def spending_by_category(items: list[dict]) -> list[dict]:
     """Saídas do mês por categoria (pagas ou não); a fatura é aberta nas categorias das compras."""
     cats: dict[str, float] = {}
     for i in items:
-        if i["kind"] != "saida" or i.get("transfer"):
-            continue
+        if i["kind"] != "saida" or i.get("transfer") or i.get("invoice_payment"):
+            continue  # pagamento de fatura não é gasto novo: as compras já contam nas categorias
         for part in i.get("parts") or [{"category": i["category"], "amount": i["amount"]}]:
             key = part["category"] or "Sem categoria"
             cats[key] = cats.get(key, 0.0) + part["amount"]

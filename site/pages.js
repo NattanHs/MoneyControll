@@ -175,7 +175,7 @@ async function quickForm(kind0 = 'saida') {
       const chips = h('div', { class: 'quick-chips', role: 'group', 'aria-label': 'Categoria' });
       const settle = h('select', { id: 'q-settle', 'aria-label': 'Quita um débito já previsto' });
       const paint = () => {
-        settle.replaceChildren(h('option', { value: '' }, kind === 'saida' ? 'Quita um débito já previsto? (opcional)' : 'Quita um recebimento já previsto? (opcional)'),
+        settle.replaceChildren(h('option', { value: '' }, kind === 'saida' ? 'Quita um débito previsto?' : 'Quita um recebimento previsto?'),
           ...links[kind].map(o => h('option', { value: linkVal(o) }, linkText(o))));
         settle.hidden = !links[kind].length;
         [...seg.children].forEach((b, i) => { b.className = (['saida', 'entrada'][i] === kind ? 'on ' : '') + (i === 0 ? 'out' : 'in'); });
@@ -349,6 +349,40 @@ async function unlinkItem(it) {
   try { await api('DELETE', `/links/${it.linked.id}`); toast('Vínculo desfeito'); refresh(); } catch (e) { toast(e.message, 'error'); }
 }
 
+// ------------------------------------------------------------------ pagamento parcial ou adiantado da fatura
+/** Janela para registrar (ou editar) um pagamento da fatura do cartão. `st` = resposta de /cards/:id/statement/:ym. */
+function invoicePaymentForm(st, existing, after = refresh, preset = null) {
+  const others = st.payments.filter(p => !existing || p.id !== existing.id).reduce((s, p) => s + p.amount, 0);
+  const left = Math.max(0, Math.round((st.total - others) * 100) / 100);
+  const acctOpts = accountsInfo.items.map(a => ({ value: String(a.id), label: a.name }));
+  openForm({
+    title: existing ? 'Editar pagamento da fatura' : 'Pagar a fatura',
+    intro: `${st.card.name} · vence em ${dateBR(st.due_date)}. Total ${fmt(st.total)}${others ? ` · já pago ${fmt(others)}` : ''} · falta ${fmt(left)}. O dinheiro sai da conta na data escolhida e a fatura passa a cobrar só o que sobrar.`,
+    initial: existing
+      ? { amount: existing.amount, date: existing.date, account_id: String(existing.account_id || st.card.pay_account_id || accountsInfo.default_id), note: existing.note || '' }
+      : { amount: preset === 'all' ? left : null, date: todayISO(), account_id: String(st.card.pay_account_id || accountsInfo.default_id), note: '' },
+    fields: [
+      { name: 'amount', label: 'Valor pago (R$)', type: 'money', half: true, placeholder: '0,00', hint: `No máximo ${fmt(left)}. Pode ser só uma parte.` },
+      { name: 'date', label: 'Data do pagamento', type: 'date', half: true, hint: 'Pode ser antes do vencimento.' },
+      ...(multiAccount() ? [{ name: 'account_id', label: 'Pago com a conta', type: 'select', options: acctOpts }] : []),
+      { name: 'note', label: 'Observação (opcional)', type: 'text', placeholder: 'Ex.: adiantei parte do bônus' },
+    ],
+    onSubmit: async v => {
+      const body = { ym: st.ym, date: v.date, amount: v.amount, note: v.note || '', account_id: v.account_id ? Number(v.account_id) : null };
+      await api(existing ? 'PUT' : 'POST', existing ? `/invoice-payments/${existing.id}` : `/cards/${st.card.id}/payments`, body);
+      toast(existing ? 'Pagamento atualizado' : left - v.amount <= 0.004 ? 'Fatura quitada' : 'Pagamento registrado');
+      after();
+    },
+  });
+}
+
+async function payInvoice(cardId, ym, existingId = null, after = refresh, preset = null) {
+  let st;
+  try { st = await api('GET', `/cards/${cardId}/statement/${ym}`); } catch (e) { toast(e.message, 'error'); return; }
+  const existing = existingId ? st.payments.find(p => p.id === existingId) : null;
+  invoicePaymentForm(st, existing, after, preset);
+}
+
 async function togglePaid(it, ym = state.ym, after = refresh) {
   try {
     await api('POST', '/payments', { source: it.source, ref_id: it.ref_id, ym, paid: !it.paid });
@@ -366,12 +400,15 @@ function itemRow(it) {
   else if (it.kind === 'saida') { amount = '− ' + fmt(it.amount); tone = 'neg'; }
   else { amount = (it.amount >= 0 ? '− ' : '+ ') + fmt(Math.abs(it.amount)); tone = 'inv'; }
   if (it.linked) { amount = (it.kind === 'entrada' ? '+ ' : '− ') + fmt(it.original_amount); tone += ' quitado'; }
+  if (it.fully_prepaid) { amount = '− ' + fmt(it.original_amount); tone += ' quitado'; }
   const tagChip = it.source === 'fixa' ? chip('Fixa', 'blue')
     : it.source === 'parcela' ? chip(`Parcela ${it.tag}`, 'amber')
       : it.source === 'fatura' ? chip(`Cartão · ${it.tag}`, 'blue')
+        : it.source === 'pag_fatura' ? chip(`Fatura ${ymShort(it.invoice_ym)}`, 'blue')
         : it.source === 'dividendo' ? chip(it.tag, 'green')
           : it.source === 'invest' ? chip('Investimento', 'purple')
             : it.transfer ? chip('Transferência', 'blue') : null;
+  const prepaidChip = it.prepaid_total ? chip(it.fully_prepaid ? `Quitada com pagamentos · ${fmt(it.prepaid_total)}` : `Já pago ${fmt(it.prepaid_total)} de ${fmt(it.original_amount)}`, 'green') : null;
   const doneChip = it.linked ? chip(`${it.kind === 'entrada' ? 'Recebido antes' : 'Pago antes'} · ${dateBR(it.linked.date).slice(0, 5)}`, 'green') : null;
   const settlesChip = it.settles ? chip(`Quita ${ymShort(it.settles.ym)}`, 'blue') : null;
   const linkTool = (label, title, fn) => h('button', { class: 'icon-btn linktool', type: 'button', title, 'aria-label': title, onclick: fn }, icon('link'), h('span', { class: 'linklabel' }, label));
@@ -387,23 +424,33 @@ function itemRow(it) {
       iconBtn('edit', 'Editar', () => transactionForm(it.kind, it)),
       iconBtn('trash', 'Excluir', () => remove(`/transactions/${it.ref_id}`, `Excluir "${it.description}"?`), 'del'));
   } else if (it.source === 'fatura') {
-    tools = h('div', { class: 'tools' }, iconBtn('card', 'Ver compras da fatura', () => openStatement(it.ref_id, state.ym)));
+    tools = h('div', { class: 'tools' },
+      it.fully_prepaid ? null : linkTool('Pagar parte', 'Pagar parte (ou toda) a fatura agora', () => payInvoice(it.ref_id, state.ym)),
+      iconBtn('card', 'Ver compras da fatura', () => openStatement(it.ref_id, state.ym)));
+  } else if (it.source === 'pag_fatura') {
+    tools = h('div', { class: 'tools' },
+      iconBtn('card', 'Ver a fatura', () => openStatement(it.card_id, it.invoice_ym)),
+      iconBtn('edit', 'Editar pagamento', () => payInvoice(it.card_id, it.invoice_ym, it.ref_id)),
+      iconBtn('trash', 'Excluir pagamento', () => remove(`/invoice-payments/${it.ref_id}`, 'Excluir este pagamento? O valor volta a ser cobrado na fatura.'), 'del'));
   }
   if (!tools && (it.source === 'fixa' || it.source === 'parcela') && (it.kind === 'saida' || it.kind === 'entrada')) {
     tools = it.linked ? h('div', { class: 'tools' }, unlinkTool)
       : (it.pending || it.manual) ? h('div', { class: 'tools' }, linkTool(it.kind === 'entrada' ? 'Já recebi' : 'Já paguei', it.kind === 'entrada' ? 'Já recebi: ligar a um lançamento' : 'Já paguei: ligar a um lançamento', () => linkPicker(it))) : null;
   }
+  const lockedMsg = it.linked ? 'Já quitado por um lançamento. Desfaça a ligação para mudar.'
+    : it.fully_prepaid ? 'Fatura quitada pelos pagamentos registrados. Exclua um pagamento para mudar.'
+      : it.source === 'pag_fatura' ? 'Pagamento de fatura: conta na data escolhida. Para mudar, edite o pagamento.' : null;
   const payBtn = it.kind === 'saida' && !it.transfer
     ? h('button', { class: 'pay-btn' + (it.paid ? ' on' : ''), type: 'button', 'aria-pressed': String(!!it.paid),
-      title: it.linked ? 'Quitado antes por um lançamento' : it.paid ? 'Paga. Clique para marcar como não paga' : 'A pagar. Clique para marcar como paga',
-      'aria-label': it.paid ? 'Marcar como não paga' : 'Marcar como paga', onclick: () => (it.linked ? toast('Já quitado por um lançamento. Desfaça a ligação para mudar.') : togglePaid(it)) }, icon('check'))
+      title: lockedMsg || (it.paid ? 'Paga. Clique para marcar como não paga' : 'A pagar. Clique para marcar como paga'),
+      'aria-label': it.paid ? 'Marcar como não paga' : 'Marcar como paga', onclick: () => (lockedMsg ? toast(lockedMsg) : togglePaid(it)) }, icon('check'))
     : null;
   const acct = multiAccount() && !state.account && !it.transfer && it.account_id ? chip(accountName(it.account_id)) : null;
   const status = it.reconciled ? chip('Conciliado', 'green') : it.transfer ? null : it.kind === 'entrada' ? (it.pending ? chip('A receber', 'amber') : null) : it.kind === 'saida' ? (it.pending ? chip('A pagar', 'amber') : null) : null;
   return h('div', { class: 'row' + (it.pending ? ' pending' : '') },
     h('div', { class: `ico ${cls}` }, icon(ic)),
     h('div', { class: 'main-col' }, h('div', { class: 'title' }, it.description),
-      h('div', { class: 'meta' }, status, doneChip, settlesChip, tagChip, acct, it.category && !['invest', 'dividendo', 'fatura', 'transferencia', 'transf_saida', 'transf_entrada'].includes(it.source) ? chip(it.category) : null)),
+      h('div', { class: 'meta' }, status, doneChip, prepaidChip, settlesChip, tagChip, acct, it.category && !['invest', 'dividendo', 'fatura', 'pag_fatura', 'transferencia', 'transf_saida', 'transf_entrada'].includes(it.source) ? chip(it.category) : null)),
     h('div', { class: `amount ${tone}` }, amount), h('div', { class: 'pay-slot' }, payBtn), tools || h('div', { class: 'tools-spacer' }));
 }
 
@@ -417,13 +464,34 @@ function openStatement(cardId, ym0) {
       const load = async () => {
         let st;
         try { st = await api('GET', `/cards/${cardId}/statement/${ym}`); } catch (e) { toast(e.message, 'error'); close(); return; }
-        const reload = () => { load(); refresh(); };
         const nav = h('div', { class: 'stmt-nav' }, iconBtn('left', 'Fatura anterior', () => { ym = ymAdd(ym, -1); load(); }),
           h('span', null, `${st.card.name} · ${ymLabel(ym)}`), iconBtn('right', 'Próxima fatura', () => { ym = ymAdd(ym, 1); load(); }));
+        const reload = () => { load(); refresh(); };
+        const part = st.paid_amount > 0;
         const head = h('div', { class: 'stmt-head' },
-          metric('Total da fatura', fmt(st.total), 'neg', true), metric('Fecha em', dateBR(st.closing_date)), metric('Vence em', dateBR(st.due_date)),
+          metric('Total da fatura', fmt(st.total), 'neg', true),
+          ...(part ? [metric('Já pago', fmt(st.paid_amount), 'pos'), metric('Falta pagar', fmt(st.remaining), st.remaining ? 'neg' : 'pos')] : []),
+          metric('Fecha em', dateBR(st.closing_date)), metric('Vence em', dateBR(st.due_date)),
           h('div', { class: 'metric' }, h('small', null, 'Situação'),
-            btn(st.paid ? 'Paga ✓' : 'Marcar como paga', st.paid ? 'success small' : 'small', () => togglePaid({ source: 'fatura', ref_id: cardId, paid: st.paid }, ym, reload))));
+            st.paid && part && st.remaining <= 0.004 ? chip('Quitada ✓', 'green')
+              : btn(st.paid ? 'Paga ✓' : part ? 'Marcar o restante como pago' : 'Marcar como paga', st.paid ? 'success small' : 'small', () => togglePaid({ source: 'fatura', ref_id: cardId, paid: st.paid }, ym, reload))));
+        const payBox = h('div', { class: 'stmt-pay' },
+          h('div', { class: 'stmt-pay-head' }, h('b', null, 'Pagamentos desta fatura'),
+            h('span', { class: 'muted' }, st.remaining > 0.004 ? 'Pague tudo ou só uma parte, antes ou no vencimento.' : 'Nada mais a pagar nesta fatura.'),
+            h('span', { style: { flex: 1 } }),
+            st.total > 0 && st.remaining > 0.004 ? btn('Pagar parte', 'small', () => invoicePaymentForm(st, null, reload), 'plus') : null,
+            st.total > 0 && st.remaining > 0.004 ? btn(`Pagar o restante (${fmt(st.remaining)})`, 'small primary', () => invoicePaymentForm(st, null, reload, 'all')) : null),
+          ...st.payments.map(pg => h('div', { class: 'row' },
+            h('div', { class: 'ico out' }, icon('card')),
+            h('div', { class: 'main-col' }, h('div', { class: 'title' }, `Pagamento em ${dateBR(pg.date)}`),
+              h('div', { class: 'meta' }, multiAccount() && pg.account_id ? chip(accountName(pg.account_id)) : null, pg.note ? h('span', null, pg.note) : null)),
+            h('div', { class: 'amount neg' }, '− ' + fmt(pg.amount)),
+            h('div', { class: 'tools', style: { opacity: 1 } },
+              iconBtn('edit', 'Editar pagamento', () => invoicePaymentForm(st, pg, reload)),
+              iconBtn('trash', 'Excluir pagamento', async () => {
+                if (!(await confirmDialog({ message: 'Excluir este pagamento? O valor volta a ser cobrado na fatura.' }))) return;
+                try { await api('DELETE', `/invoice-payments/${pg.id}`); toast('Pagamento excluído'); reload(); } catch (e) { toast(e.message, 'error'); }
+              }, 'del')))));
         const lines = st.lines.map(l => h('div', { class: 'row' },
           h('div', { class: 'ico out' }, icon('up')),
           h('div', { class: 'main-col' }, h('div', { class: 'title' }, l.description),
@@ -437,7 +505,7 @@ function openStatement(cardId, ym0) {
                 try { await api('DELETE', `/transactions/${l.ref_id}`); toast('Excluído'); reload(); } catch (e) { toast(e.message, 'error'); }
               }, 'del'))
             : h('div', { class: 'tools-spacer' })));
-        body.replaceChildren(nav, head, ...(lines.length ? lines : [h('div', { class: 'muted', style: { padding: '14px 4px' } }, 'Nenhuma compra nesta fatura.')]));
+        body.replaceChildren(nav, head, ...(st.total > 0 || st.payments.length ? [payBox] : []), ...(lines.length ? lines : [h('div', { class: 'muted', style: { padding: '14px 4px' } }, 'Nenhuma compra nesta fatura.')]));
       };
       load();
       return h('div', null, body, h('div', { class: 'modal-foot' },
@@ -682,7 +750,7 @@ function installmentRow(i) {
 function cardRow(c) {
   const stm = c.statements.map(st => h('button', { type: 'button', class: `chip btnlike ${st.paid ? 'green' : st.open ? 'blue' : 'amber'}`,
     title: `Vence em ${dateBR(st.due_date)}`, onclick: () => openStatement(c.id, st.ym) },
-  `${st.open ? 'Aberta' : st.paid ? 'Paga' : 'A pagar'} · ${ymShort(st.ym)} · ${fmt(st.total)}`));
+  `${st.open ? 'Aberta' : st.paid ? 'Paga' : 'A pagar'} · ${ymShort(st.ym)} · ${fmt(st.total)}${st.paid_amount && !st.paid ? ` (falta ${fmt(st.remaining)})` : ''}`));
   return h('div', { class: 'list-row' },
     h('div', { class: 'ico blue', style: { width: '38px', height: '38px', borderRadius: '12px', display: 'grid', placeItems: 'center', flex: 'none' } }, icon('card')),
     h('div', { class: 'grow' }, h('b', null, c.name), h('small', null, `fecha dia ${c.closing_day} · vence dia ${c.due_day}`), h('div', { class: 'stmt-chips' }, stm)),

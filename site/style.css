@@ -393,3 +393,8 @@ a.btn { text-decoration: none; color: inherit; }
 .linklabel { display: none; }
 @media (max-width: 640px) { .icon-btn.linktool { width: auto; padding: 0 10px; gap: 6px; display: inline-flex; align-items: center; color: var(--text); }
   .linktool .linklabel { display: inline; font-size: 13px; font-weight: 650; } }
+
+/* pagamento parcial / adiantado de fatura */
+.stmt-pay { background: var(--soft); border-radius: 14px; padding: 8px 14px 10px; margin: 10px 0 14px; }
+.stmt-pay-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 0 8px; }
+.stmt-pay .row { background: var(--card); margin-top: 6px; }
