@@ -24,7 +24,7 @@ def _month_totals(items: list[dict]) -> dict:
     """Totais do mês pelo que foi lançado (recebido ou não, pago ou não): visão de competência."""
     entradas = sum(i["amount"] for i in items if i["kind"] == "entrada")
     saidas = sum(i["amount"] for i in items if i["kind"] == "saida" and not i.get("transfer"))
-    aportes = sum(i["amount"] for i in items if i["kind"] == "invest")
+    aportes = sum(i["amount"] for i in items if i["kind"] == "invest" and not i.get("no_cash"))
     return {"entradas": round(entradas, 2), "saidas": round(saidas, 2), "aportes": round(aportes, 2),
             "resultado": round(entradas - saidas - aportes, 2)}
 

@@ -1,7 +1,7 @@
 """Controle financeiro mensal: lançamentos, despesas fixas, parcelamentos, cartão e saldo com transporte."""
 from __future__ import annotations
 
-from . import accounts, cards, db
+from . import accounts, cards, db, goals, health
 from . import validate as v
 from .common import amount_at, month_day, ym_add, ym_diff  # noqa: F401  (reexportados)
 
@@ -51,6 +51,12 @@ def save_transaction(conn, d: dict, id: int | None = None) -> int:
         "card_id": cards.check_card(conn, d.get("card_id")) if kind == "saida" else None,
         "account_id": accounts.check_account(conn, d.get("account_id")),
     }
+    row["goal_id"] = goals.check_goal(conn, d.get("goal_id")) if kind in ("saida", "entrada") and not row["card_id"] else None
+    if row["goal_id"] and kind == "entrada":  # retirada do objetivo: não pode passar do que está lá
+        disponivel = goals.available(conn, row["goal_id"], exclude_tx=id)
+        if row["amount"] > disponivel + 0.005:
+            raise ValueError(f"Só há {disponivel:.2f} disponíveis neste objetivo para retirar.".replace(".", ","))
+    row["goal_cash"] = v.boolean(d, "goal_cash", True) if row["goal_id"] else 1
     repeat = 0
     if id is None and d.get("repeat") not in (None, "", 0, "0"):
         repeat = v.integer(d, "repeat", "A repetição", 0, 60)
@@ -140,6 +146,35 @@ def save_fixed(conn, d: dict, id: int | None = None) -> int:
 def delete_fixed(conn, id: int) -> None:
     _delete(conn, "fixed_items", id)
     _clear_item(conn, "fixa", "fixed", id)
+    conn.execute("DELETE FROM month_overrides WHERE ref_type = 'fixed' AND ref_id = ?", (id,))
+
+
+def _overrides_by_ref(conn) -> dict:
+    out: dict = {}
+    for o in db.rows(conn, "SELECT ref_id, ym, amount FROM month_overrides WHERE ref_type = 'fixed'"):
+        out.setdefault(o["ref_id"], {})[o["ym"]] = o["amount"]
+    return out
+
+
+def set_fixed_month(conn, fixed_id: int, ym: str, d: dict) -> None:
+    """Define o valor de uma fixa só no mês `ym`. Os demais meses continuam como estavam."""
+    f = conn.execute("SELECT start_month, end_month FROM fixed_items WHERE id = ?", (fixed_id,)).fetchone()
+    if f is None:
+        raise ValueError("Registro não encontrado.")
+    v.month({"m": ym}, "m", "o mês")
+    if ym < f[0] or (f[1] and ym > f[1]):
+        raise ValueError("Esse mês está fora do período em que a conta vale.")
+    amount = round(v.number(d, "amount", "O valor deste mês"), 2)
+    conn.execute(
+        "INSERT INTO month_overrides(ref_type, ref_id, ym, amount) VALUES ('fixed', ?, ?, ?) "
+        "ON CONFLICT(ref_type, ref_id, ym) DO UPDATE SET amount = excluded.amount",
+        (fixed_id, ym, amount))
+
+
+def reset_fixed_month(conn, fixed_id: int, ym: str) -> None:
+    """Volta o valor deste mês para o padrão da conta (ou reajuste vigente)."""
+    conn.execute("DELETE FROM month_overrides WHERE ref_type = 'fixed' AND ref_id = ? AND ym = ?",
+                 (fixed_id, ym))
 
 
 def list_fixed(conn, today_ym: str) -> list[dict]:
@@ -426,8 +461,10 @@ def load_all(conn) -> dict:
     changes = _changes_by_ref(conn)
     fixed = db.rows(conn, "SELECT * FROM fixed_items")
     installments = db.rows(conn, "SELECT * FROM installments")
+    overrides = _overrides_by_ref(conn)
     for f in fixed:
         f["changes"] = changes.get(("fixed", f["id"]), [])
+        f["overrides"] = overrides.get(f["id"], {})
     for i in installments:
         i["changes"] = changes.get(("installment", i["id"]), [])
     default = accounts.default_id(conn)
@@ -441,6 +478,7 @@ def load_all(conn) -> dict:
         "transactions": own(db.rows(conn, "SELECT * FROM transactions")),
         "fixed": own(fixed),
         "installments": own(installments),
+        "goals": db.rows(conn, "SELECT id, name FROM goals"),
         "cards": cards_,
         "marks": {(m["source"], m["ref_id"], m["ym"]): m["paid"] for m in db.rows(conn, "SELECT * FROM payment_marks")},
         "links": {(l["source"], l["ref_id"], l["ym"]): l for l in db.rows(conn, "SELECT * FROM occurrence_links")},
@@ -473,14 +511,23 @@ def items_for_month(data: dict, ym: str, today: str, account: int | None = None)
     como uma linha neutra (kind 'transfer'); ao filtrar uma conta viram saída/entrada daquela conta.
     """
     items = []
+    goal_names = {g["id"]: g["name"] for g in data.get("goals", [])}
     for t in data["transactions"]:
         if t["date"][:7] == ym and not t.get("card_id"):
-            items.append(_item("lancamento", t["id"], t["date"], t["description"], t["category"],
-                               t["kind"], t["amount"], account_id=t["account_id"]))
+            if t.get("goal_id"):  # objetivo: guardar é aporte (sai da conta); retirar é o contrário (volta)
+                sinal = t["amount"] if t["kind"] == "saida" else -t["amount"]
+                items.append(_item("lancamento", t["id"], t["date"], t["description"], t["category"],
+                                   "invest", sinal, account_id=t["account_id"],
+                                   goal_id=t["goal_id"], goal_name=goal_names.get(t["goal_id"], ""),
+                                   no_cash=not t.get("goal_cash", 1)))
+            else:
+                items.append(_item("lancamento", t["id"], t["date"], t["description"], t["category"],
+                                   t["kind"], t["amount"], account_id=t["account_id"]))
     for f in data["fixed"]:
         if f["start_month"] <= ym and (not f["end_month"] or ym <= f["end_month"]):
             items.append(_item("fixa", f["id"], month_day(ym, f["day"]), f["description"], f["category"],
-                               f["kind"], amount_at(f["amount"], f["changes"], ym), "Fixa", account_id=f["account_id"]))
+                               f["kind"], f["overrides"].get(ym, amount_at(f["amount"], f["changes"], ym)), "Fixa",
+                               account_id=f["account_id"], month_override=ym in f["overrides"]))
     for i in data["installments"]:
         idx = ym_diff(i["first_date"][:7], ym)
         if 0 <= idx < i["n_installments"] and not i.get("card_id"):
@@ -612,7 +659,8 @@ def run(data: dict, upto_ym: str, today: str, account: int | None = None) -> lis
         a_receber = sum(i["amount"] for i in items if i["kind"] == "entrada" and i["pending"])
         saidas = sum(i["amount"] for i in items if i["kind"] == "saida" and not i["pending"])
         a_pagar = sum(i["amount"] for i in items if i["kind"] == "saida" and i["pending"])
-        aportes = sum(i["amount"] for i in items if i["kind"] == "invest")
+        # aporte que sai da conta reduz o saldo; depósito fora da conta principal (no_cash) não mexe nele
+        aportes = sum(i["amount"] for i in items if i["kind"] == "invest" and not i.get("no_cash"))
         resultado = entradas - saidas - aportes
         previsto = resultado + a_receber - a_pagar
         saldo_prev += previsto
@@ -646,6 +694,11 @@ def spending_by_category(items: list[dict]) -> list[dict]:
     return sorted(({"category": k, "total": round(t, 2)} for k, t in cats.items()), key=lambda c: -c["total"])
 
 
+def _retrato_seguro(data: dict, today: str):
+    from . import retrato  # importa aqui porque o retrato também usa este módulo
+    return retrato.seguro(data, today)
+
+
 def month_view(conn, ym: str, today: str, account: int | None = None) -> dict:
     v.check_month(ym)
     data = load_all(conn)
@@ -671,4 +724,5 @@ def month_view(conn, ym: str, today: str, account: int | None = None) -> dict:
         "accounts": [{"id": a["id"], "name": a["name"], "kind": a["kind"]} for a in data["accounts"]],
         "items": items, "by_category": by_cat, "budgets": budget_status(data["budgets"], by_cat),
         "year_series": year_series,
+        "health": health.assess(summary, by_cat, _retrato_seguro(data, today)), "top_spending": health.top_spending(by_cat, 3),
     }

@@ -1,7 +1,8 @@
 """Telas que combinam caixa e investimentos: visão geral, painel de investimentos e configurações."""
 from __future__ import annotations
 
-from . import accounts, db, finance, invest
+from . import goals, health, accounts, db, finance, invest, retrato
+from . import reserva as reserva_mod
 from . import validate as v
 
 KIND_PLURAL = {"acao": "Ações", "fii": "FIIs", "etf": "ETFs", "bdr": "BDRs", "outro": "Outros"}
@@ -57,6 +58,10 @@ def overview(conn, today: str) -> dict:
     rv_value = round(sum(p["value"] for p in positions if not p["closed"]), 2)
     rf_value = round(sum(p["saldo"] for p in products), 2)
     conta = current["saldo_final"]
+    # objetivos: só o que já foi aportado por lançamentos (esse dinheiro saiu da conta e vira investimento)
+    objetivos = goals.list_goals(conn, today)
+    obj_value = round(sum(g["saved_linked"] for g in objetivos), 2)
+    reserva = next((g for g in objetivos if g["reserve"]), None)
 
     labels = _last_months(ym, 12)
     inv = invest.series(conn, labels)
@@ -65,6 +70,8 @@ def overview(conn, today: str) -> dict:
                   "rf": i["rf"], "rv": i["rv"]} for m, i in zip(labels, inv)]
 
     allocation = _allocation(positions, products)
+    if obj_value > 0:
+        allocation.append({"label": "Objetivos", "value": obj_value})
     if conta > 0:
         allocation.insert(0, {"label": "Conta", "value": conta})
     budget_alerts = [b for b in finance.budget_status(
@@ -72,12 +79,15 @@ def overview(conn, today: str) -> dict:
         if b["state"] != "ok"]
     upcoming = [months[m] for m in (finance.ym_add(ym, k) for k in (1, 2, 3)) if m in months]
     acc = accounts.list_accounts(conn, today)
+    by_cat = finance.spending_by_category(finance.items_for_month(data, ym, today))
+    health_now = health.assess(current, by_cat, retrato.seguro(data, today))
     return {
         "today": today, "ym": ym, "accounts": acc["items"],
-        "patrimonio_total": round(conta + rv_value + rf_value, 2),
-        "conta": conta, "investido": round(rv_value + rf_value, 2),
+        "patrimonio_total": round(conta + rv_value + rf_value + obj_value, 2),
+        "conta": conta, "objetivos": obj_value, "investido": round(rv_value + rf_value + obj_value, 2),
         "renda_variavel": rv_value, "renda_fixa": rf_value,
-        "current_month": current, "evolution": evolution, "allocation": allocation, "upcoming": upcoming,
+        "reserva": reserva, "reserva_status": reserva_mod.status(conn, today), "current_month": current, "health": health_now, "top_spending": health.top_spending(by_cat, 3),
+        "evolution": evolution, "allocation": allocation, "upcoming": upcoming,
         "budget_alerts": budget_alerts,
         "has_data": bool(data["transactions"] or data["fixed"] or data["installments"] or data["transfers"]
                          or data["ops"] or data["fi_moves"]),

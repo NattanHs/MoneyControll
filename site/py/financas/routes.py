@@ -12,7 +12,7 @@ import tempfile
 from datetime import date
 from pathlib import Path
 
-from . import accounts, analysis, backup, bank, cards, db, finance, invest, onboarding, reports, syncmeta
+from . import accounts, acessos, analysis, backup, bank, cards, consultor, db, finance, goals, reserva, invest, onboarding, reports, syncmeta
 
 # o "servidor" que os handlers recebem: só precisa saber onde está o banco e que dia é hoje
 class Ctx:
@@ -131,6 +131,18 @@ def _update(saver):
     return lambda c, m, b, s: (saver(c, b, int(m.group(1))), ok())[1]
 
 
+def _login(c, m, b, s):
+    return acessos.verificar(b.get("user"), b.get("password"), s.today)
+
+
+def _acesso(c, m, b, s):
+    return {"required": acessos.required()}
+
+
+def _acesso_validar(c, m, b, s):
+    return acessos.valido(b.get("user"), s.today)
+
+
 def _no_license(c, m, b, s):
     # sem licença: o app é seu, nunca expira nem pede chave
     return {"enabled": False, "blocked": False, "state": "livre"}
@@ -165,6 +177,9 @@ ROUTES = [
     ("POST", r"/api/sync/adopt", _sync_adopt),
     ("POST", r"/api/reset", _reset),
     ("GET", r"/api/license", _no_license),
+    ("GET", r"/api/acesso", _acesso),
+    ("POST", r"/api/login", _login),
+    ("POST", r"/api/acesso/validar", _acesso_validar),
     ("GET", r"/api/wizard", lambda c, m, b, s: {"needed": onboarding.needed(c)}),
     ("POST", r"/api/wizard", lambda c, m, b, s: onboarding.finish(c, b)),
     ("POST", r"/api/wizard/skip", lambda c, m, b, s: onboarding.skip(c)),
@@ -178,6 +193,15 @@ ROUTES = [
     ("POST", r"/api/links", lambda c, m, b, s: finance.add_link(c, b)),
     ("DELETE", r"/api/links/(\d+)", _do(finance.remove_link)),
     # orçamento por categoria
+    ("GET", r"/api/reserve/suggest", lambda c, m, b, s: reserva.suggest(c, s.today)),
+    ("GET", r"/api/reserve/status", lambda c, m, b, s: reserva.status(c, s.today)),
+    ("GET", r"/api/consultor", lambda c, m, b, s: consultor.analisar(c, s.today)),
+    ("POST", r"/api/reserve/apply", lambda c, m, b, s: {"id": reserva.apply(c, s.today)}),
+    ("GET", r"/api/goals/(\d+)/movements", lambda c, m, b, s: goals.movements(c, int(m.group(1)))),
+    ("GET", r"/api/goals", lambda c, m, b, s: goals.list_goals(c, s.today)),
+    ("POST", r"/api/goals", _create(goals.save_goal)),
+    ("PUT", r"/api/goals/(\d+)", _update(goals.save_goal)),
+    ("DELETE", r"/api/goals/(\d+)", _do(goals.delete_goal)),
     ("GET", r"/api/budgets", lambda c, m, b, s: finance.list_budgets(c)),
     ("POST", r"/api/budgets", _create(finance.save_budget)),
     ("PUT", r"/api/budgets/(\d+)", _update(finance.save_budget)),
@@ -217,6 +241,10 @@ ROUTES = [
     ("POST", r"/api/fixed", _create(finance.save_fixed)),
     ("PUT", r"/api/fixed/(\d+)", _update(finance.save_fixed)),
     ("DELETE", r"/api/fixed/(\d+)", _do(finance.delete_fixed)),
+    ("PUT", r"/api/fixed/(\d+)/month/(\d{4}-\d{2})",
+     lambda c, m, b, s: (finance.set_fixed_month(c, int(m.group(1)), m.group(2), b), ok())[1]),
+    ("DELETE", r"/api/fixed/(\d+)/month/(\d{4}-\d{2})",
+     lambda c, m, b, s: (finance.reset_fixed_month(c, int(m.group(1)), m.group(2)), ok())[1]),
     # parcelas
     ("POST", r"/api/installments", _create(finance.save_installment)),
     ("PUT", r"/api/installments/(\d+)", _update(finance.save_installment)),

@@ -121,6 +121,26 @@ CREATE TABLE IF NOT EXISTS amount_changes (
     UNIQUE (ref_type, ref_id, from_month)
 );
 
+-- valor de uma fixa válido só num mês (não altera os outros meses nem os reajustes)
+CREATE TABLE IF NOT EXISTS month_overrides (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref_type TEXT NOT NULL CHECK (ref_type IN ('fixed')),
+    ref_id   INTEGER NOT NULL,
+    ym       TEXT NOT NULL,
+    amount   REAL NOT NULL CHECK (amount > 0),
+    UNIQUE (ref_type, ref_id, ym)
+);
+
+-- objetivos de poupança (valor-alvo, já guardado e aporte mensal)
+CREATE TABLE IF NOT EXISTS goals (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name    TEXT NOT NULL,
+    target  REAL NOT NULL CHECK (target > 0),
+    saved   REAL NOT NULL DEFAULT 0 CHECK (saved >= 0),
+    monthly REAL NOT NULL DEFAULT 0 CHECK (monthly >= 0),
+    done    INTEGER NOT NULL DEFAULT 0
+);
+
 -- cartões de crédito: compras caem na fatura que vence no mês calculado pelo fechamento
 CREATE TABLE IF NOT EXISTS credit_cards (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,6 +258,11 @@ def _add_column(conn, table: str, column: str, ddl: str) -> None:
 def migrate(conn: sqlite3.Connection) -> None:
     """Atualiza bancos criados por versões anteriores do aplicativo."""
     _add_column(conn, "transactions", "card_id", "INTEGER")
+    _add_column(conn, "transactions", "goal_id", "INTEGER")  # saída que vai para um objetivo
+    _add_column(conn, "goals", "reserve", "INTEGER NOT NULL DEFAULT 0")  # objetivo de reserva de emergência
+    _add_column(conn, "goals", "earns", "INTEGER NOT NULL DEFAULT 0")  # 1 = o dinheiro do objetivo rende (% do CDI)
+    _add_column(conn, "goals", "pct_cdi", "REAL NOT NULL DEFAULT 100")  # rendimento, em % do CDI
+    _add_column(conn, "transactions", "goal_cash", "INTEGER NOT NULL DEFAULT 1")  # 0 = depósito fora da conta principal
     _add_column(conn, "installments", "card_id", "INTEGER")
     _add_column(conn, "fixed_income", "tax", "TEXT NOT NULL DEFAULT 'regressivo'")
     # contas: tudo que existia pertence à "Conta principal", que herda o antigo saldo inicial
