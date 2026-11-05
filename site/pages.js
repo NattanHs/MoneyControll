@@ -19,6 +19,7 @@ const NAV = [
   { id: 'mes', label: 'Mês a mês', short: 'Mês', icon: 'calendar' },
   { id: 'conc', label: 'Conciliação', short: 'Extrato', icon: 'link' },
   { id: 'fixas', label: 'Fixas e parcelas', short: 'Fixas', icon: 'repeat' },
+  { id: 'obj', label: 'Objetivos', short: 'Objetivos', icon: 'sliders' },
   { id: 'invest', label: 'Investimentos', short: 'Invest.', icon: 'trending' },
   { id: 'relat', label: 'Relatórios', short: 'Relat.', icon: 'chart' },
   { id: 'config', label: 'Configurações', short: 'Ajustes', icon: 'sliders' },
@@ -54,6 +55,36 @@ function budgetBars(list) {
 }
 
 // ------------------------------------------------------------------ visão geral
+// situação financeira do mês (saudável / ok / preocupante) com uma sugestão
+const HEALTH_STYLE = {
+  saudavel: { color: '#16a34a', label: 'Saudável' },
+  ok: { color: '#d97706', label: 'Estável' },
+  preocupante: { color: '#dc2626', label: 'Preocupante' },
+  sem_dados: { color: '#6b7280', label: '' },
+};
+function healthCard(hs) {
+  if (!hs || hs.level === 'sem_dados') return null;
+  const st = HEALTH_STYLE[hs.level] || HEALTH_STYLE.ok;
+  return h('div', { class: 'card health-card', style: { marginBottom: '18px', borderLeft: `4px solid ${st.color}` }, role: 'status' },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+      h('span', { class: 'chip', style: { background: st.color, color: '#fff' } }, st.label),
+      h('b', null, hs.title)),
+    h('p', { class: 'muted', style: { margin: '6px 0 0' } }, hs.message),
+    hs.tip ? h('p', { style: { margin: '6px 0 0' } }, h('b', null, 'Sugestão: '), hs.tip) : null,
+    hs.base_meses ? h('p', { class: 'muted', style: { margin: '8px 0 0', fontSize: '12px' } },
+      `Baseado em ${hs.base_meses} ${hs.base_meses === 1 ? 'mês' : 'meses'} de histórico${hs.confianca < 1 ? ' (a precisão aumenta com mais meses lançados)' : ''}.`) : null);
+}
+
+// três maiores despesas do mês, em destaque discreto (alerta de concentração)
+function topSpendingBlock(top, total) {
+  if (!top || !top.length || total <= 0) return null;
+  return h('div', { class: 'top-spend', style: { margin: '4px 0 12px', padding: '10px 12px', borderRadius: '10px', background: 'rgba(245,158,11,.08)' } },
+    h('div', { style: { fontSize: '13px', fontWeight: 600, marginBottom: '6px', color: '#b45309' } }, '⚠ Onde está concentrado o seu gasto'),
+    top.map((t, i) => h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '13px', padding: '2px 0' } },
+      h('span', null, `${i + 1}. ${t.category || 'Sem categoria'}`),
+      h('span', { class: 'num' }, `${fmt(t.total)} · ${Math.round(t.share * 100)}%`))));
+}
+
 async function pageOverview() {
   const o = await api('GET', '/overview');
   const cm = o.current_month;
@@ -86,9 +117,12 @@ async function pageOverview() {
   } catch { /* sem armazenamento */ }
 
   const part = (label, value) => h('div', { class: 'part' }, h('small', null, label), h('b', { class: 'num' }, value));
+  const hc = healthCard(o.health); if (hc) root.append(hc);
+  const consult = await api('GET', '/consultor').catch(() => null); const cc = consultorCard(consult); if (cc) root.append(cc);
   root.append(h('div', { class: 'card hero' },
     h('div', null, h('div', { class: 'label' }, 'Patrimônio total'), h('div', { class: 'value num' }, fmt(o.patrimonio_total))),
     h('div', { class: 'parts' }, part('Saldo em conta', fmt(o.conta)), part('Renda fixa', fmt(o.renda_fixa)), part('Renda variável', fmt(o.renda_variavel)),
+      o.objetivos > 0 ? part('Objetivos (aportado)', fmt(o.objetivos)) : null,
       cm.a_receber > 0 ? part('A receber este mês', fmt(cm.a_receber)) : null,
       cm.a_pagar > 0 ? part('A pagar este mês', fmt(cm.a_pagar)) : null)));
 
@@ -99,6 +133,7 @@ async function pageOverview() {
         tone: toneOf(a.balance), sub: a.kind_label + (Math.abs(a.forecast - a.balance) > 0.004 ? ` · previsto ${fmt(a.forecast)}` : '') })))));
   }
   root.append(h('div', { class: 'kpis cols3' },
+    reserveTile(o.reserva, o.reserva_status),
     kpi('Entradas do mês', fmt(cm.entradas), { tone: 'pos', dot: '#22c55e', sub: 'já recebidas' }),
     kpi('Proventos a receber', fmt(cm.a_receber), { tone: 'amber', dot: '#f59e0b', sub: 'entradas com data futura neste mês' }),
     kpi('Saídas pagas', fmt(cm.saidas), { tone: 'neg', dot: '#ef4444' }),
@@ -152,7 +187,7 @@ function cardDueYm(card, iso) {
 const isPhone = () => window.matchMedia('(max-width: 640px)').matches;
 
 async function quickForm(kind0 = 'saida') {
-  const [sugg, cats, links] = await Promise.all([api('GET', '/suggestions').catch(() => []), categoryList(), linkOptionsFor(null)]);
+  const [sugg, cats, links, goalList] = await Promise.all([api('GET', '/suggestions').catch(() => []), categoryList(), linkOptionsFor(null), api('GET', '/goals').catch(() => [])]);
   let kind = kind0, category = '';
   const count = {};
   sugg.forEach(s => { if (s.category) { const k = `${s.kind}|${s.category}`; count[k] = (count[k] || 0) + 1; } });
@@ -174,10 +209,20 @@ async function quickForm(kind0 = 'saida') {
       const seg = h('div', { class: 'segmented', role: 'group' });
       const chips = h('div', { class: 'quick-chips', role: 'group', 'aria-label': 'Categoria' });
       const settle = h('select', { id: 'q-settle', 'aria-label': 'Quita um débito já previsto' });
+      const goalSel = h('select', { id: 'q-goal', 'aria-label': 'Vai para um objetivo' },
+        h('option', { value: '' }, 'Gasto normal (sem objetivo)'), goalList.map(g => h('option', { value: String(g.id) }, `Objetivo: ${g.name}`)));
+      goalSel.hidden = true;
+      const cashChk = h('input', { type: 'checkbox', id: 'q-goal-cash', checked: true });
+      const cashLbl = h('label', { class: 'check-row', style: { display: 'flex', gap: '8px', alignItems: 'center', fontSize: '13px' } },
+        cashChk, 'Sai desta conta (desmarque se foi um depósito específico)');
+      cashLbl.hidden = true;
+      goalSel.addEventListener('change', () => { cashLbl.hidden = goalSel.hidden || !goalSel.value; });
       const paint = () => {
         settle.replaceChildren(h('option', { value: '' }, kind === 'saida' ? 'Quita um débito previsto?' : 'Quita um recebimento previsto?'),
           ...links[kind].map(o => h('option', { value: linkVal(o) }, linkText(o))));
         settle.hidden = !links[kind].length;
+        goalSel.hidden = !(kind === 'saida' && goalList.length);
+        cashLbl.hidden = goalSel.hidden || !goalSel.value;
         [...seg.children].forEach((b, i) => { b.className = (['saida', 'entrada'][i] === kind ? 'on ' : '') + (i === 0 ? 'out' : 'in'); });
         dl.replaceChildren(...[...new Set(sugg.filter(s => s.kind === kind).map(s => s.description))].slice(0, 60).map(d => h('option', { value: d })));
         chips.replaceChildren(...topFor(kind).map(c => h('button', { type: 'button', class: 'qchip' + (c === category ? ' on' : ''), onclick: () => { category = category === c ? '' : c; paint(); } }, c)));
@@ -196,6 +241,8 @@ async function quickForm(kind0 = 'saida') {
         if (!date.value) { error.textContent = 'Informe a data.'; error.hidden = false; return; }
         const body = { kind, description: desc.value.trim() || category || (kind === 'saida' ? 'Gasto' : 'Recebimento'), amount: value, date: date.value,
           category, card_id: null, repeat: 0, account_id: acct ? Number(acct.value) : null,
+          goal_id: kind === 'saida' && !goalSel.hidden && goalSel.value ? Number(goalSel.value) : null,
+          goal_cash: cashChk.checked ? 1 : 0,
           settles: parseLink(settle.hidden ? '' : settle.value) };
         try {
           await sendTransaction(body);
@@ -205,7 +252,7 @@ async function quickForm(kind0 = 'saida') {
       };
       paint();
       return h('form', { novalidate: true, onsubmit: e => { e.preventDefault(); save(false); } },
-        h('div', { class: 'modal-body quick' }, seg, amount, desc, dl, settle, chips,
+        h('div', { class: 'modal-body quick' }, seg, amount, desc, dl, settle, goalSel, cashLbl, chips,
           h('div', { class: 'quick-row' }, date, acct), error),
         h('div', { class: 'modal-foot' }, btn('Salvar e novo', '', () => save(true)), h('button', { class: 'btn primary', type: 'submit' }, 'Salvar')));
     },
@@ -213,10 +260,11 @@ async function quickForm(kind0 = 'saida') {
 }
 
 async function transactionForm(kind, existing, opts = {}) {
-  const [cats, cardList, sugg] = await Promise.all([
+  const [cats, cardList, sugg, goalList] = await Promise.all([
     categoryList(),
     api('GET', '/cards').catch(() => []),
     api('GET', '/suggestions').catch(() => []),
+    api('GET', '/goals').catch(() => []),
   ]);
   const isNew = !existing || opts.duplicate;
   const links = await linkOptionsFor(isNew ? null : existing.ref_id);
@@ -231,6 +279,8 @@ async function transactionForm(kind, existing, opts = {}) {
     initial = { kind, date: opts.today || todayISO().startsWith(state.ym) ? todayISO() : `${state.ym}-01`, card_id: opts.card_id || '' };
   }
   if (initial.card_id == null) initial.card_id = '';
+  initial.goal_id = initial.goal_id ? String(initial.goal_id) : '';
+  initial.goal_cash = initial.goal_cash === undefined ? true : !!initial.goal_cash && initial.goal_cash !== 0;
   initial.account_id = accountInitial(initial);
   for (const k of ['saida', 'entrada']) { const cur = links[k].find(o => o.current); initial[`settles_${k}`] = cur ? linkVal(cur) : ''; }
   const byDesc = new Map(sugg.map(s => [`${s.kind}|${norm(s.description)}`, s]));
@@ -252,6 +302,13 @@ async function transactionForm(kind, existing, opts = {}) {
       { name: 'amount', label: 'Valor (R$)', type: 'money', half: true, placeholder: '0,00' },
       { name: 'date', label: 'Data', type: 'date', half: true, hint: 'Saída com data futura fica em "A pagar" até o dia (ou até você marcar como paga).' },
       { name: 'category', label: 'Categoria (opcional)', type: 'text', list: 'category', placeholder: 'Ex.: Moradia' },
+      { name: 'goal_id', label: 'Esse valor vai para um objetivo?', type: 'select',
+        options: [{ value: '', label: 'Não, é um gasto normal' }, ...goalList.map(g => ({ value: String(g.id), label: `Objetivo: ${g.name}` }))],
+        showIf: v => v.kind === 'saida' && !v.card_id && goalList.length > 0,
+        hint: 'O valor é contado como guardado nesse objetivo, e não como gasto.' },
+      { name: 'goal_cash', label: 'Esse dinheiro sai desta conta?', type: 'check',
+        showIf: v => v.kind === 'saida' && !v.card_id && !!v.goal_id,
+        hint: 'Desmarque se foi um depósito específico vindo de outro lugar: o saldo principal não é reduzido, mas o objetivo recebe o valor.' },
       { name: 'card_id', label: 'Pago no cartão de crédito?', type: 'select', options: [{ value: '', label: 'Não, sai direto da conta' }, ...cardList.map(c => ({ value: String(c.id), label: c.name }))],
         showIf: v => v.kind === 'saida' && cardList.length > 0 },
       ...accountField('Conta', { showIf: v => !(v.kind === 'saida' && v.card_id), hint: 'De qual conta o dinheiro sai ou entra.' }),
@@ -265,6 +322,8 @@ async function transactionForm(kind, existing, opts = {}) {
     ],
     onSubmit: async v => {
       const body = { ...v, card_id: v.kind === 'saida' && v.card_id ? Number(v.card_id) : null, repeat: v.repeat || 0, account_id: accountVal(v),
+        goal_id: v.kind === 'saida' && v.goal_id && !v.card_id ? Number(v.goal_id) : null,
+        goal_cash: v.goal_cash === false ? 0 : 1,
         settles: parseLink(v.kind === 'saida' ? v.settles_saida : v.settles_entrada) };
       await api(existing && !opts.duplicate ? 'PUT' : 'POST', existing && !opts.duplicate ? `/transactions/${existing.ref_id}` : '/transactions', body);
       const card = body.card_id ? cardList.find(c => c.id === body.card_id) : null;
@@ -401,7 +460,8 @@ function itemRow(it) {
   else { amount = (it.amount >= 0 ? '− ' : '+ ') + fmt(Math.abs(it.amount)); tone = 'inv'; }
   if (it.linked) { amount = (it.kind === 'entrada' ? '+ ' : '− ') + fmt(it.original_amount); tone += ' quitado'; }
   if (it.fully_prepaid) { amount = '− ' + fmt(it.original_amount); tone += ' quitado'; }
-  const tagChip = it.source === 'fixa' ? chip('Fixa', 'blue')
+  const tagChip = it.goal_name ? chip(`Objetivo · ${it.goal_name}${it.no_cash ? ' · fora da conta' : ''}`, 'green')
+    : it.source === 'fixa' ? chip('Fixa', 'blue')
     : it.source === 'parcela' ? chip(`Parcela ${it.tag}`, 'amber')
       : it.source === 'fatura' ? chip(`Cartão · ${it.tag}`, 'blue')
         : it.source === 'pag_fatura' ? chip(`Fatura ${ymShort(it.invoice_ym)}`, 'blue')
@@ -421,7 +481,7 @@ function itemRow(it) {
   } else if (it.source === 'lancamento') {
     tools = h('div', { class: 'tools' }, unlinkTool,
       iconBtn('copy', 'Duplicar', () => transactionForm(it.kind, it, { duplicate: true })),
-      iconBtn('edit', 'Editar', () => transactionForm(it.kind, it)),
+      iconBtn('edit', 'Editar', () => (it.kind === 'invest' ? transactionForm('saida', { ...it, kind: 'saida' }) : transactionForm(it.kind, it))),
       iconBtn('trash', 'Excluir', () => remove(`/transactions/${it.ref_id}`, `Excluir "${it.description}"?`), 'del'));
   } else if (it.source === 'fatura') {
     tools = h('div', { class: 'tools' },
@@ -432,6 +492,12 @@ function itemRow(it) {
       iconBtn('card', 'Ver a fatura', () => openStatement(it.card_id, it.invoice_ym)),
       iconBtn('edit', 'Editar pagamento', () => payInvoice(it.card_id, it.invoice_ym, it.ref_id)),
       iconBtn('trash', 'Excluir pagamento', () => remove(`/invoice-payments/${it.ref_id}`, 'Excluir este pagamento? O valor volta a ser cobrado na fatura.'), 'del'));
+  }
+  if (it.source === 'fixa' && !it.linked && !it.transfer) {
+    tools = h('div', { class: 'tools' },
+      (it.pending || it.manual) ? linkTool(it.kind === 'entrada' ? 'Já recebi' : 'Já paguei', it.kind === 'entrada' ? 'Já recebi: ligar a um lançamento' : 'Já paguei: ligar a um lançamento', () => linkPicker(it)) : null,
+      iconBtn('edit', 'Alterar o valor só deste mês', () => fixedMonthForm(it)),
+      it.month_override ? iconBtn('x', 'Voltar ao valor padrão deste mês', () => resetFixedMonth(it)) : null);
   }
   if (!tools && (it.source === 'fixa' || it.source === 'parcela') && (it.kind === 'saida' || it.kind === 'entrada')) {
     tools = it.linked ? h('div', { class: 'tools' }, unlinkTool)
@@ -550,6 +616,7 @@ async function pageMonth() {
     h('div', { class: 'month-nav' }, iconBtn('left', 'Mês anterior', () => go(-1)), picker, iconBtn('right', 'Próximo mês', () => go(1))),
     btn('Entrada', 'success', () => transactionForm('entrada'), 'plus'),
     btn('Saída', 'danger-soft', () => transactionForm('saida'), 'plus'),
+    btn('Reserva de emergência', 'ghost small', () => { location.hash = '#/reserva'; }, 'shield'),
     multiAccount() ? btn('Transferência', 'small', () => transferForm(), 'repeat') : null));
 
   if (multiAccount()) {
@@ -620,12 +687,13 @@ async function pageMonth() {
 
   const donut = chartBox(), bars = chartBox();
   const catTotal = d.by_category.reduce((a, c) => a + c.total, 0);
-  const rightStack = [h('div', { class: 'card' }, h('div', { class: 'section-title' }, 'Saídas por categoria', btn('Limites', 'ghost small', () => { location.hash = '#/config'; })), donut)];
+  const rightStack = [h('div', { class: 'card' }, h('div', { class: 'section-title' }, 'Saídas por categoria', btn('Limites', 'ghost small', () => { location.hash = '#/config'; })), topSpendingBlock(d.top_spending, catTotal), donut)];
   if (d.budgets.length) {
     rightStack.unshift(h('div', { class: 'card' + (d.budgets.some(b => b.state !== 'ok') ? ' alert-card' : '') },
       h('div', { class: 'section-title' }, 'Orçamento do mês', h('small', null, 'saídas pagas e a pagar')), budgetBars(d.budgets)));
   }
   rightStack.push(h('div', { class: 'card' }, h('div', { class: 'section-title' }, `Saldo final em ${ym.slice(0, 4)}`, h('small', null, 'futuros = previsto')), bars));
+  const hm = healthCard(d.health); if (hm) root.append(hm);
   root.append(h('div', { class: 'grid-2' },
     h('div', { class: 'card' }, h('div', { class: 'section-title' }, 'Movimentações', listTitle), filters, sumLine, list),
     h('div', { class: 'stack' }, rightStack)));
@@ -647,6 +715,28 @@ const changeChips = (changes) => (changes || []).map(c => h('span', { class: 'ch
   `→ ${fmt(c.amount)} desde ${ymBR(c.from_month)}`,
   h('button', { type: 'button', title: 'Remover este reajuste', 'aria-label': 'Remover este reajuste',
     onclick: () => remove(`/amount-changes/${c.id}`, `Remover o reajuste para ${fmt(c.amount)} a partir de ${ymBR(c.from_month)}? O valor anterior volta a valer desse mês em diante.`) }, '×')));
+
+// valor de uma fixa só neste mês (os outros meses não mudam)
+function fixedMonthForm(it) {
+  openForm({
+    title: 'Valor deste mês',
+    intro: `${it.description} em ${ymBR(state.ym)}. Só este mês muda; os demais meses continuam iguais.`,
+    initial: { amount: it.amount },
+    fields: [{ name: 'amount', label: 'Valor neste mês (R$)', type: 'money', placeholder: '0,00' }],
+    submitLabel: 'Salvar valor do mês',
+    onSubmit: async v => {
+      await api('PUT', `/fixed/${it.ref_id}/month/${state.ym}`, { amount: v.amount });
+      toast('Valor deste mês atualizado');
+      refresh();
+    },
+  });
+}
+
+async function resetFixedMonth(it) {
+  if (!(await confirmDialog({ message: `Voltar ${it.description} ao valor padrão em ${ymBR(state.ym)}?` }))) return;
+  try { await api('DELETE', `/fixed/${it.ref_id}/month/${state.ym}`); toast('Valor padrão restaurado'); refresh(); }
+  catch (e) { toast(e.message, 'error'); }
+}
 
 async function fixedForm(existing) {
   const cats = await categoryList();
@@ -1113,6 +1203,281 @@ async function pageInvest() {
 }
 
 // ------------------------------------------------------------------ configurações
+// ------------------------------------------------------------------ objetivos
+const goalStatusText = g => {
+  if (g.status === 'concluido') return { txt: 'Meta atingida', cls: 'pos' };
+  if (g.status === 'sem_aporte') return { txt: 'Defina quanto guardar por mês para ver a data estimada', cls: 'muted' };
+  return { txt: `Previsão: ${ymLabel(g.eta)} (em ${g.months_left} ${g.months_left === 1 ? 'mês' : 'meses'})`, cls: '' };
+};
+
+function goalCard(g) {
+  const st = goalStatusText(g);
+  const color = g.status === 'concluido' ? '#16a34a' : g.pct >= 75 ? '#22c55e' : '#4f46e5';
+  return h('div', { class: 'card', style: { marginBottom: '14px' } },
+    h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' } },
+      h('b', null, g.name),
+      h('div', { class: 'tools' },
+        iconBtn('edit', 'Editar objetivo', () => goalForm(g)),
+        iconBtn('trash', 'Excluir objetivo', () => remove(`/goals/${g.id}`, `Excluir o objetivo "${g.name}"?`), 'del'))),
+    h('div', { role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': g.pct,
+      'aria-label': `${g.name}: ${g.pct}% guardado`,
+      style: { height: '12px', borderRadius: '99px', background: 'var(--line, #e5e7eb)', overflow: 'hidden', margin: '10px 0 6px' } },
+      h('div', { style: { width: `${g.pct}%`, height: '100%', background: color, transition: 'width .3s' } })),
+    h('div', { class: 'row', style: { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px', fontSize: '13px' } },
+      h('span', null, `${fmt(g.saved)} de ${fmt(g.target)} (${g.pct}%)`),
+      g.remaining > 0 ? h('span', { class: 'muted' }, `Faltam ${fmt(g.remaining)}`) : null),
+    h('div', { class: 'muted', style: { fontSize: '13px', marginTop: '6px' } },
+      g.monthly > 0 ? `Guardando ${fmt(g.monthly)} por mês · ` : '', h('span', { class: st.cls }, st.txt)),
+    g.earns ? h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '4px' } },
+      `Rende ${qty(g.pct_cdi)}% do CDI (≈ ${num(g.rate_annual)}% ao ano), estimativa líquida de IR`,
+      g.months_no_yield && g.months_left && g.months_no_yield !== g.months_left
+        ? ` · sem rendimento seriam ${g.months_no_yield} ${g.months_no_yield === 1 ? 'mês' : 'meses'}` : '') : null,
+    g.saved_linked > 0 ? h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '4px' } },
+      `Inclui ${fmt(g.saved_linked)} de lançamentos vinculados${g.saved_base > 0 ? ` e ${fmt(g.saved_base)} já guardados` : ''}`) : null);
+}
+
+// reserva de emergência sugerida: 6 meses de custo de vida, ajustados pelo histórico (o perfil não é mostrado)
+function reserveModal(after) {
+  modal({
+    title: 'Reserva de emergência sugerida',
+    build: close => {
+      const body = h('div', { class: 'modal-body' }, h('p', { class: 'muted' }, 'Calculando…'));
+      (async () => {
+        let s;
+        try { s = await api('GET', '/reserve/suggest'); } catch (e) { body.replaceChildren(h('p', null, e.message)); return; }
+        if (!s.ok) { body.replaceChildren(h('p', null, s.message)); return; }
+        const linha = (t, v, sub) => h('div', { class: 'row', style: { display: 'flex', justifyContent: 'space-between', gap: '8px', padding: '6px 0' } },
+          h('span', null, t, sub ? h('div', { class: 'muted', style: { fontSize: '12px' } }, sub) : null), h('b', { class: 'num' }, v));
+        body.replaceChildren(
+          h('p', { class: 'muted' }, s.message),
+          linha('Custo essencial médio por mês', fmt(s.custo_mensal), 'Essenciais e dívidas'),
+          linha('Renda média por mês', fmt(s.renda_mensal)),
+          h('div', { class: 'card', style: { margin: '12px 0', borderLeft: '4px solid #4f46e5' } },
+            linha(`Sugestão: ${s.meses_sugeridos} meses de gastos essenciais`, fmt(s.alvo_situacao), 'Valor recomendado para a sua reserva'),
+          ),
+          linha(`Referência: ${s.meses_base} meses de renda`, fmt(s.alvo_renda), 'Para comparação'),
+          h('div', { class: 'modal-foot', style: { display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '12px' } },
+            btn('Fechar', 'ghost', close),
+            btn(`Usar ${fmt(s.alvo_situacao)} como reserva`, 'primary', async () => {
+              try { await api('POST', '/reserve/apply'); toast('Reserva de emergência atualizada'); close(); after(); }
+              catch (e) { toast(e.message, 'error'); }
+            }, 'check')));
+      })();
+      return body;
+    },
+  });
+}
+
+// tile da reserva na tela inicial: toque abre o módulo
+function reserveTile(r, st) {
+  let sub = !r ? 'Toque para calcular a sugestão'
+    : `${r.pct}% de ${fmt(r.target)}${r.remaining > 0 ? ` · faltam ${fmt(r.remaining)}` : ' · meta atingida'}`;
+  let tone = 'inv';
+  if (st && st.pronta) {
+    sub = `${st.cobertura_meses} meses de gastos essenciais cobertos · ${st.titulo}`;
+    tone = st.nivel === 'critico' ? 'neg' : st.nivel === 'atencao' ? 'amber' : 'pos';
+  }
+  return h('a', { href: '#/reserva', style: { textDecoration: 'none', color: 'inherit', display: 'block' }, 'aria-label': 'Abrir reserva de emergência' },
+    kpi('Reserva de emergência', fmt(r ? r.saved : 0), { tone, dot: '#0ea5e9', sub }));
+}
+
+// guardar ou retirar da reserva (lançamento vinculado ao objetivo de reserva)
+function reserveMoveForm(kind, reserve, after = refresh, existing = null) {
+  const guardar = kind === 'saida';
+  openForm({
+    title: existing ? (guardar ? 'Editar valor guardado' : 'Editar retirada') : (guardar ? 'Guardar na reserva' : 'Retirar da reserva'),
+    intro: guardar ? 'O valor entra na reserva. Desmarque se o dinheiro veio de fora desta conta.'
+      : `Disponível para retirar: ${fmt(reserve.saved)}.`,
+    initial: existing ? { date: existing.date, description: existing.description, amount: existing.amount,
+      goal_cash: !!existing.goal_cash, account_id: existing.account_id ? String(existing.account_id) : accountInitial() }
+      : { date: todayISO(), description: guardar ? 'Reserva de emergência' : 'Retirada da reserva', goal_cash: true, account_id: accountInitial() },
+    fields: [
+      { name: 'amount', label: 'Valor (R$)', type: 'money', half: true, placeholder: '0,00' },
+      { name: 'date', label: 'Data', type: 'date', half: true },
+      { name: 'description', label: 'Descrição (opcional)', type: 'text' },
+      { name: 'goal_cash', label: guardar ? 'Esse dinheiro sai desta conta?' : 'Esse dinheiro volta para esta conta?', type: 'check',
+        hint: guardar ? 'Desmarque para um depósito específico de fora: o saldo principal não muda.'
+          : 'Desmarque se o valor não deve voltar para o saldo desta conta.' },
+      ...accountField('Conta'),
+    ],
+    submitLabel: existing ? 'Salvar alteração' : (guardar ? 'Guardar' : 'Retirar'),
+    onSubmit: async v => {
+      const body = { kind, description: v.description || (guardar ? 'Reserva de emergência' : 'Retirada da reserva'),
+        amount: v.amount, date: v.date, category: 'Reserva de emergência', card_id: null, repeat: 0,
+        goal_id: reserve.id, goal_cash: v.goal_cash === false ? 0 : 1, account_id: accountVal(v) };
+      if (existing) {
+        await api('PUT', `/transactions/${existing.id}`, body);
+        toast('Movimento alterado');
+      } else {
+        await sendTransaction(body);
+        toast(guardar ? 'Valor guardado na reserva' : 'Valor retirado da reserva');
+      }
+      after();
+    },
+  });
+}
+
+// consultor: recomendações priorizadas a partir da saúde financeira real (sem IA externa; dados ficam no aparelho)
+const REC_ICON = { orcamento: 'trending', divida: 'down', reserva: 'shield', corte: 'sliders', poupanca: 'up', ok: 'check' };
+const REC_COR = { 0: '#dc2626', 1: '#dc2626', 2: '#d97706', 3: '#4f46e5', 4: '#0ea5e9', 9: '#16a34a' };
+
+function recCard(r, compacto = false) {
+  return h('div', { class: 'card', style: { marginBottom: '10px', borderLeft: `4px solid ${REC_COR[r.prioridade] || '#4f46e5'}` } },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } }, icon(REC_ICON[r.tipo] || 'check'), h('b', null, r.titulo)),
+    h('p', { class: 'muted', style: { margin: '6px 0 0', fontSize: '14px' } }, r.texto),
+    !compacto && r.impacto > 0 ? h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '4px' } },
+      r.tipo === 'corte' ? `Impacto estimado: ${fmt(r.impacto)} por mês` : `Valor de referência: ${fmt(r.impacto)} por mês`) : null);
+}
+
+function consultorCard(c) {
+  if (!c || !c.ok || !c.recomendacoes.length) return null;
+  return h('div', { class: 'card', style: { marginBottom: '18px' } },
+    h('div', { class: 'section-title' }, 'Consultor: prioridades', btn('Ver todas', 'ghost small', () => { location.hash = '#/consultor'; }, 'chart')),
+    c.recomendacoes.slice(0, 3).map(r => recCard(r, true)));
+}
+
+async function pageConsultor() {
+  const c = await api('GET', '/consultor');
+  const root = h('div');
+  root.append(pageHead('Consultor financeiro', 'Sugestões a partir dos seus últimos meses', btn('Voltar', 'ghost small', () => { location.hash = '#/visao'; }, 'left')));
+  if (!c.ok) { root.append(h('div', { class: 'card' }, emptyState('Ainda sem dados', c.message))); return root; }
+  root.append(h('div', { class: 'card', style: { marginBottom: '14px' } },
+    h('div', { class: 'muted', style: { fontSize: '13px' } },
+      `Renda média ${fmt(c.diagnostico.renda)} · gastos essenciais ${fmt(c.diagnostico.gasto_essencial)} · sobra média ${fmt(c.diagnostico.sobra)} · ${c.diagnostico.taxa_poupanca}% da renda guardada. Baseado em ${c.meses} meses.`)));
+  c.recomendacoes.forEach(r => root.append(recCard(r)));
+  root.append(h('p', { class: 'muted', style: { fontSize: '12px', marginTop: '10px' } },
+    'Estas são sugestões automáticas com base nos seus lançamentos. Não substituem a orientação de um profissional. Os cortes nunca mexem em gastos essenciais.'));
+  return root;
+}
+
+// composição e cobertura da reserva, com aviso visível e sugestão de aporte
+function reserveStatusCard(st) {
+  const cores = { critico: '#dc2626', atencao: '#d97706', ok: '#16a34a' };
+  const cor = cores[st.nivel] || '#d97706';
+  const pctCob = Math.min(100, Math.round(st.cobertura_meses / st.meses_meta * 100));
+  const comp = st.composicao && st.composicao.length ? st.composicao.map(c =>
+    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr auto', gap: '4px 10px', padding: '6px 0', fontSize: '13px' } },
+      h('span', null, c.categoria),
+      h('span', { class: 'num' }, `${fmt(c.mensal)} · ${c.percentual}%`),
+      h('div', { style: { gridColumn: '1 / -1', height: '6px', borderRadius: '99px', background: 'var(--line, #e5e7eb)', overflow: 'hidden' } },
+        h('div', { style: { width: `${c.percentual}%`, height: '100%', background: '#94a3b8' } })))) : [h('p', { class: 'muted' }, 'Sem gastos essenciais registrados ainda.')];
+  return h('div', { class: 'card', style: { marginBottom: '14px', borderLeft: `4px solid ${cor}` } },
+    h('div', { role: 'alert', style: { background: `${cor}1a`, borderRadius: '10px', padding: '10px 12px', marginBottom: '12px' } },
+      h('b', { style: { color: cor } }, st.titulo),
+      h('p', { style: { margin: '4px 0 0', fontSize: '14px' } }, st.aviso)),
+    h('div', { class: 'section-title' }, 'Cobertura da reserva', h('small', null, `${st.cobertura_meses} de ${st.meses_meta} meses`)),
+    h('div', { role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': pctCob, 'aria-label': 'Cobertura da reserva',
+      style: { height: '12px', borderRadius: '99px', background: 'var(--line, #e5e7eb)', overflow: 'hidden', margin: '8px 0' } },
+      h('div', { style: { width: `${pctCob}%`, height: '100%', background: cor } })),
+    h('div', { class: 'muted', style: { fontSize: '13px' } },
+      `Custo essencial médio: ${fmt(st.custo_essencial)} por mês. Falta ${fmt(st.falta)} para a meta.`),
+    h('div', { style: { marginTop: '10px', padding: '10px 12px', borderRadius: '10px', background: 'rgba(79,70,229,.08)' } },
+      h('b', null, 'Sugestão de aporte: '), fmt(st.aporte_sugerido), ' por mês. ', st.texto_aporte,
+      st.aporte_cabe ? null : h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '4px' } },
+        `Sua sobra média é de ${fmt(st.sobra_media)} por mês, então o prazo foi ampliado para caber no orçamento.`)),
+    h('div', { class: 'section-title', style: { marginTop: '14px' } }, 'De onde vem o custo essencial'),
+    comp);
+}
+
+async function pageReserve() {
+  const list = await api('GET', '/goals');
+  const r = list.find(g => g.reserve);
+  const root = h('div');
+  root.append(pageHead('Reserva de emergência', 'Seu dinheiro para imprevistos',
+    btn('Voltar', 'ghost small', () => { location.hash = '#/visao'; }, 'left'),
+    r ? btn('Atualizar sugestão', 'small', () => reserveModal(refresh), 'sliders') : null));
+  if (!r) {
+    root.append(h('div', { class: 'card' }, emptyState('Você ainda não tem uma reserva',
+      'A sugestão usa seu histórico para indicar quanto guardar: em geral, alguns meses do seu custo de vida.',
+      btn('Calcular sugestão', 'primary', () => reserveModal(refresh), 'sliders'))));
+    return root;
+  }
+  const st = await api('GET', '/reserve/status');
+  if (st && st.pronta) root.append(reserveStatusCard(st));
+  const color = r.status === 'concluido' ? '#16a34a' : r.pct >= 75 ? '#22c55e' : '#0ea5e9';
+  root.append(h('div', { class: 'card', style: { marginBottom: '14px' } },
+    h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' } },
+      h('div', { class: 'value num', style: { fontSize: '26px', fontWeight: 700 } }, fmt(r.saved)),
+      h('span', { class: 'muted' }, `de ${fmt(r.target)} · ${r.pct}%`)),
+    h('div', { role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': r.pct,
+      style: { height: '12px', borderRadius: '99px', background: 'var(--line, #e5e7eb)', overflow: 'hidden', margin: '10px 0 6px' } },
+      h('div', { style: { width: `${r.pct}%`, height: '100%', background: color } })),
+    h('div', { class: 'muted', style: { fontSize: '13px' } },
+      r.remaining > 0 ? `Faltam ${fmt(r.remaining)} para a meta.` : 'Meta de reserva atingida.'),
+    h('div', { class: 'actions', style: { marginTop: '12px', display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+      btn('Guardar', 'success', () => reserveMoveForm('saida', r), 'plus'),
+      btn('Retirar', 'danger-soft', () => reserveMoveForm('entrada', r), 'down'))));
+
+  const movs = await api('GET', `/goals/${r.id}/movements`);
+  root.append(h('div', { class: 'card' },
+    h('div', { class: 'section-title' }, 'Movimentos da reserva'),
+    movs.length ? movs.map(m => h('div', { class: 'row', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '8px 0', borderBottom: '1px solid var(--line, #e5e7eb)' } },
+      h('span', null, `${dateBR(m.date)} · ${m.description}`),
+      h('span', { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+        h('b', { class: 'num ' + (m.kind === 'saida' ? 'pos' : 'neg') }, (m.kind === 'saida' ? '+ ' : '− ') + fmt(m.amount)),
+        iconBtn('edit', 'Editar movimento', () => reserveMoveForm(m.kind, r, refresh, m)),
+        iconBtn('trash', 'Excluir movimento', () => remove(`/transactions/${m.id}`, `Excluir este movimento de ${fmt(m.amount)} da reserva?`), 'del'))))
+      : h('p', { class: 'muted' }, 'Nenhum movimento ainda. Use Guardar para começar.')));
+  return root;
+}
+
+function reserveCard(reserve) {
+  const head = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+    h('div', null, h('b', null, 'Reserva de emergência'),
+      h('div', { class: 'muted', style: { fontSize: '13px' } }, 'Recomendada para imprevistos: alguns meses dos seus gastos essenciais.')),
+    h('div', { class: 'actions' },
+      reserve ? btn('Abrir reserva', 'primary small', () => { location.hash = '#/reserva'; }, 'shield') : null,
+      btn(reserve ? 'Recalcular sugestão' : 'Calcular sugestão', 'small', () => reserveModal(refresh), 'sliders')));
+  if (!reserve) return h('div', { class: 'card', style: { marginBottom: '14px' } }, head);
+  return h('div', { class: 'card', style: { marginBottom: '14px' } }, head, h('div', { style: { marginTop: '10px' } }, goalCard(reserve)));
+}
+
+async function pageGoals() {
+  const list = await api('GET', '/goals');
+  const root = h('div');
+  root.append(pageHead('Objetivos', 'Quanto falta para cada meta e quando deve ser atingida',
+    btn('Novo objetivo', 'primary', () => goalForm(), 'plus')));
+  const reserve = list.find(g => g.reserve);
+  root.append(reserveCard(reserve || null));
+  const metas = list.filter(g => !g.reserve);
+  if (!metas.length && !reserve) {
+    root.append(h('div', { class: 'card' }, emptyState('Nenhum objetivo ainda',
+      'Crie uma meta (viagem, carro, reserva) e informe quanto quer guardar por mês para ver a data prevista.',
+      btn('Novo objetivo', 'primary', () => goalForm(), 'plus'))));
+    return root;
+  }
+  const open = metas.filter(g => g.status !== 'concluido'), done = metas.filter(g => g.status === 'concluido');
+  open.forEach(g => root.append(goalCard(g)));
+  if (done.length) root.append(h('div', { class: 'section-title', style: { marginTop: '18px' } }, 'Concluídos'), ...done.map(goalCard));
+  return root;
+}
+
+function goalForm(existing) {
+  openForm({
+    title: existing ? 'Editar objetivo' : 'Novo objetivo',
+    intro: 'Informe quanto quer juntar, quanto já guardou e quanto pretende guardar por mês. O app calcula quanto falta e a data prevista.',
+    initial: existing ? { name: existing.name, target: existing.target, saved: existing.saved_base, monthly: existing.monthly, earns: !!existing.earns, pct_cdi: existing.pct_cdi } : { saved: 0, monthly: 0, earns: false, pct_cdi: 100 },
+    fields: [
+      { name: 'name', label: 'Nome do objetivo', type: 'text', placeholder: 'Ex.: Viagem, carro, reserva' },
+      { name: 'target', label: 'Valor do objetivo (R$)', type: 'money', half: true, placeholder: '0,00' },
+      { name: 'saved', label: 'Já guardado antes (R$)', type: 'money', half: true, placeholder: '0,00',
+        hint: 'Lançamentos vinculados a este objetivo somam automaticamente.' },
+      { name: 'monthly', label: 'Quanto guardar por mês (R$)', type: 'money', placeholder: '0,00',
+        hint: 'Sem valor aqui não há data prevista.' },
+      { name: 'earns', label: 'Investimento com rendimento (% do CDI)', type: 'check',
+        hint: 'Marque se o dinheiro deste objetivo fica investido e rende. A data prevista passa a considerar os juros.' },
+      { name: 'pct_cdi', label: 'Rende quantos % do CDI?', type: 'number', placeholder: '100', showIf: v => !!v.earns,
+        hint: 'Ex.: 100 para 100% do CDI. Usa o CDI das Configurações. A estimativa já desconta o IR e é uma aproximação: o rendimento real varia.' },
+    ],
+    submitLabel: 'Salvar objetivo',
+    onSubmit: async v => {
+      await api(existing ? 'PUT' : 'POST', existing ? `/goals/${existing.id}` : '/goals', v);
+      toast('Objetivo salvo');
+      refresh();
+    },
+  });
+}
+
 async function budgetForm(existing) {
   const cats = await categoryList();
   openForm({
@@ -1314,7 +1679,8 @@ async function pageSettings() {
         budgetRows)),
     h('div', { class: 'stack' },
     licenseInfo.enabled ? licenseCard(licenseInfo) : null,
-    syncCard(),
+    window.MC_HIDE_SYNC ? null : syncCard(),
+    authInfo.required ? logoutCard() : null,
     exportCard(),
     h('div', { class: 'card' },
       h('div', { class: 'section-title' }, 'Seus dados e backups'),
@@ -1725,6 +2091,54 @@ async function pageBank() {
 }
 
 
+// ------------------------------------------------------------------ acesso (login/senha)
+const SESS_KEY = 'mc_sess';
+const sessUser = () => { try { return localStorage.getItem(SESS_KEY) || ''; } catch { return ''; } };
+const setSess = u => { try { localStorage.setItem(SESS_KEY, u); } catch { /* sem armazenamento */ } };
+const clearSess = () => { try { localStorage.removeItem(SESS_KEY); } catch { /* ignorar */ } };
+let authInfo = { required: false };
+
+async function ensureAuth() {
+  authInfo = await api('GET', '/acesso');
+  if (!authInfo.required) return true;
+  const u = sessUser();
+  if (u) { try { if ((await api('POST', '/acesso/validar', { user: u })).valido) return true; } catch { /* segue para o login */ } clearSess(); }
+  return false;
+}
+
+function loginScreen() {
+  const user = h('input', { type: 'text', id: 'lg-user', autocomplete: 'username', autocapitalize: 'none', autocorrect: 'off', placeholder: 'Usuário' });
+  const pass = h('input', { type: 'password', id: 'lg-pass', autocomplete: 'current-password', placeholder: 'Senha' });
+  const err = h('div', { class: 'form-error', hidden: true });
+  const submit = async () => {
+    err.hidden = true;
+    try {
+      const r = await api('POST', '/login', { user: (user.value || '').trim(), password: pass.value || '' });
+      setSess(r.usuario); toast(`Bem-vindo, ${r.nome || ''}!`); route();
+    } catch (e) { err.textContent = e.message; err.hidden = false; }
+  };
+  const form = h('form', { class: 'card lic-screen', onsubmit: e => { e.preventDefault(); submit(); } },
+    h('div', { class: 'brand', style: { marginBottom: '12px' } },
+      h('span', { class: 'logo' }, h('img', { src: 'icon-192.png', alt: '' })),
+      h('div', null, h('b', null, 'MoneyControl'), h('small', null, 'controle financeiro'))),
+    h('div', { class: 'section-title' }, 'Entrar'),
+    h('p', { class: 'muted', style: { marginBottom: '14px' } }, 'Use o usuário e a senha que você recebeu. O acesso é pessoal e protege os seus próprios dados — não compartilhe.'),
+    h('div', { class: 'field' }, h('label', { for: 'lg-user' }, 'Usuário'), user),
+    h('div', { class: 'field' }, h('label', { for: 'lg-pass' }, 'Senha'), pass),
+    err,
+    h('div', { class: 'modal-foot', style: { marginTop: '10px' } }, h('button', { class: 'btn primary', type: 'submit' }, 'Entrar')));
+  setTimeout(() => { try { user.focus(); } catch { /* ignorar */ } }, 50);
+  return form;
+}
+
+function logoutCard() {
+  const nome = sessUser();
+  return h('div', { class: 'card', style: { marginTop: '18px' } },
+    h('div', { class: 'section-title' }, 'Acesso'),
+    h('p', { class: 'muted', style: { marginBottom: '12px' } }, `Você está conectado${nome ? ' como ' + nome : ''}. O acesso é pessoal; não compartilhe seu usuário e senha.`),
+    btn('Sair', 'small danger-soft', () => { clearSess(); toast('Você saiu'); route(); }, 'x'));
+}
+
 // ------------------------------------------------------------------ licença e primeiro uso
 let licenseInfo = { enabled: false, blocked: false, state: 'livre' };
 let wizardChecked = false;
@@ -1878,6 +2292,7 @@ function syncCard() {
 
 /** Aviso no topo das telas quando a sessão do Google expirou e vale a pena sincronizar. */
 function syncNotice() {
+  if (window.MC_HIDE_SYNC) return null;
   if (inAndroidApp()) return null;
   const st = Sync.status();
   if (!st.configured || st.connected || !st.everConnected) return null;
@@ -1908,7 +2323,7 @@ function firstRunWizard(settings) {
 }
 
 // ------------------------------------------------------------------ roteamento e inicialização
-const PAGES = { visao: pageOverview, mes: pageMonth, conc: pageBank, fixas: pageRecurring, invest: pageInvest, relat: pageReports, config: pageSettings };
+const PAGES = { visao: pageOverview, mes: pageMonth, conc: pageBank, fixas: pageRecurring, obj: pageGoals, reserva: pageReserve, consultor: pageConsultor, invest: pageInvest, relat: pageReports, config: pageSettings };
 let renderToken = 0;
 
 function renderNav(active) {
@@ -1923,6 +2338,7 @@ async function route() {
   const v = $('#view');
   if (!v.firstChild) v.append(h('div', { class: 'loading' }, 'Carregando…'));
   try {
+    if (!(await ensureAuth())) { if (token === renderToken) v.replaceChildren(loginScreen()); return; }
     licenseInfo = await api('GET', '/license');
     if (licenseInfo.blocked) { if (token === renderToken) v.replaceChildren(licenseScreen(licenseInfo)); return; }
     await loadAccounts();
@@ -1985,6 +2401,7 @@ async function boot() {
 
 let syncFirst = null;
 function startSync() {
+  if (window.MC_HIDE_SYNC) return;
   if (inAndroidApp()) return;
   Sync.onEvent(onSyncEvent);
   const back = Sync.redirectResult;   // acabou de voltar do login do Google?

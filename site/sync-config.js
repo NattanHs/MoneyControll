@@ -1,4 +1,5 @@
-/* Configuração da sincronização com o Google Drive.
-   Cole entre as aspas o "ID do cliente" criado no Google Cloud (termina com .apps.googleusercontent.com).
-   Deixando vazio, o app pergunta o ID na tela Configurações. Veja o LEIA-ME, Parte 4. */
+/* Configuração da versão do escritório.
+   Drive escondido (clientes usam backup manual). Para religar o Drive, apague a linha MC_HIDE_SYNC
+   e cole o ID do cliente do Google em MC_GOOGLE_CLIENT_ID. Veja o LEIA-ME. */
 window.MC_GOOGLE_CLIENT_ID = '';
+window.MC_HIDE_SYNC = true;
